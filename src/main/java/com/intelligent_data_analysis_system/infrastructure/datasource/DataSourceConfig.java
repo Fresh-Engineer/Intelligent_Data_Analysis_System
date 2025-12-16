@@ -27,8 +27,8 @@ public class DataSourceConfig {
     public DataSource routingDataSource() {
         String dbms = routingProperties.getDbms().toLowerCase(); // mysql / pg
 
-        DataSource finance = buildDataSource(dbms.equals("pg") ? multi.getFinancePg() : multi.getFinanceMysql());
-        DataSource healthcare = buildDataSource(dbms.equals("pg") ? multi.getHealthcarePg() : multi.getHealthcareMysql());
+        DataSource finance = buildDataSource(dbms.equals("pg") ? multi.getFinancePgsql() : multi.getFinanceMysql());
+        DataSource healthcare = buildDataSource(dbms.equals("pg") ? multi.getHealthcarePgsql() : multi.getHealthcareMysql());
 
         Map<Object, Object> targets = new HashMap<>();
         targets.put(DataSourceDomain.FINANCE.name(), finance);
@@ -49,7 +49,6 @@ public class DataSourceConfig {
         ds.setPassword(p.getPassword());
         ds.setDriverClassName(p.getDriverClassName());
 
-        // 可选：比赛/开发阶段建议加
         ds.setMaximumPoolSize(5);
         ds.setMinimumIdle(1);
         ds.setPoolName("Hikari-" + p.getUrl());
@@ -62,14 +61,14 @@ public class DataSourceConfig {
         MybatisSqlSessionFactoryBean factory = new MybatisSqlSessionFactoryBean();
         factory.setDataSource(routingDataSource);
 
-        // ✅ 手动创建 MybatisConfiguration（类型正确）
+        // 手动创建 MybatisConfiguration（类型正确）
         com.baomidou.mybatisplus.core.MybatisConfiguration configuration =
                 new com.baomidou.mybatisplus.core.MybatisConfiguration();
         configuration.setMapUnderscoreToCamelCase(true);
         configuration.setLogImpl(org.apache.ibatis.logging.stdout.StdOutImpl.class); // 可选
         factory.setConfiguration(configuration);
 
-        // ✅ 关键：让 MP 还能识别 @TableName/@TableField 等（建议保留）
+        // 关键：让 MP 还能识别 @TableName/@TableField 等
         factory.setGlobalConfig(new com.baomidou.mybatisplus.core.config.GlobalConfig());
 
         return factory.getObject();

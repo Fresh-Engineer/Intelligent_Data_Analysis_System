@@ -54,7 +54,7 @@ logging:
 app:
   routing:
     # mysql / pg
-    dbms: mysql
+    dbms: pg
 
     domains:
       finance: finance

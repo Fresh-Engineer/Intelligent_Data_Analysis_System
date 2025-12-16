@@ -19,7 +19,7 @@ public class SqlExecuteService {
      * 你仓库里已经有 app.routing.dbms（mysql / pgsql），这里直接复用。
      * 没配就默认 mysql。
      */
-    @Value("${app.routing.dbms:mysql}")
+    @Value("${app.routing.dbms}")
     private String defaultDbms;
 
     public SqlExecuteService(NamedParameterJdbcTemplate namedJdbc) {

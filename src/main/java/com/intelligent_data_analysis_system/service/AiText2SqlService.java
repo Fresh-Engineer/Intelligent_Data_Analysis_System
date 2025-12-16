@@ -9,10 +9,10 @@ import java.util.*;
 @Service
 public class AiText2SqlService {
 
-    @Value("${app.routing.dbms:mysql}")
+    @Value("${app.routing.dbms}")
     private String defaultDbms;
 
-    @Value("${app.ai.mode:stub}")   // stub | llm
+    @Value("${app.ai.mode}")
     private String aiMode;
 
     private final ObjectMapper mapper = new ObjectMapper();
