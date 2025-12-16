@@ -2,6 +2,9 @@ server:
   port: 8090
 
 spring:
+  profiles:
+    active: local
+
   application:
     name: Intelligent_Data_Analysis_System
 
@@ -9,29 +12,28 @@ spring:
     # MySQL
     healthcare_mysql:
       driver-class-name: com.mysql.cj.jdbc.Driver
-      url: jdbc:mysql://127.0.0.1:3306/healthcare_analytics_competition?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8
-      username: root
-      password: SHXshx520520!
+      url: ${HEALTH_CARE_MYSQL}
+      username: ${USERNAME_MYSQL}
+      password: ${PWD_MYSQL}
 
     finance_mysql:
-      # ✅ 你原来写成 org.mysql.cj.jdbc.Driver，会导致 Hikari 加载不到驱动
       driver-class-name: com.mysql.cj.jdbc.Driver
-      url: jdbc:mysql://127.0.0.1:3306/financial_asset_management?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8
-      username: root
-      password: SHXshx520520!
+      url: ${FINANCE_MYSQL}
+      username: ${USERNAME_MYSQL}
+      password: ${PWD_MYSQL}
 
     # PostgreSQL
     healthcare_pgsql:
       driver-class-name: org.postgresql.Driver
-      url: jdbc:postgresql://127.0.0.1:5432/healthcare_analytics_competition
-      username: postgres
-      password: SHXshx520520!
+      url: ${HEALTH_CARE_PGSQL}
+      username: ${USERNAME_PGSQL}
+      password: ${PWD_PGSQL}
 
     finance_pgsql:
       driver-class-name: org.postgresql.Driver
-      url: jdbc:postgresql://127.0.0.1:5432/financial_asset_management
-      username: postgres
-      password: SHXshx520520!
+      url: ${FINANCE_PGSQL}
+      username: ${USERNAME_PGSQL}
+      password: ${PWD_PGSQL}
 
 mybatis-plus:
   type-aliases-package: com.intelligent_data_analysis_system.domain
