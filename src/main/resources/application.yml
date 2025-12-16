@@ -1,0 +1,59 @@
+server:
+  port: 8090
+
+spring:
+  application:
+    name: Intelligent_Data_Analysis_System
+
+  datasource:
+    # MySQL
+    healthcare_mysql:
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      url: jdbc:mysql://127.0.0.1:3306/healthcare_analytics_competition?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8
+      username: root
+      password: SHXshx520520!
+
+    finance_mysql:
+      # ✅ 你原来写成 org.mysql.cj.jdbc.Driver，会导致 Hikari 加载不到驱动
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      url: jdbc:mysql://127.0.0.1:3306/financial_asset_management?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8
+      username: root
+      password: SHXshx520520!
+
+    # PostgreSQL
+    healthcare_pgsql:
+      driver-class-name: org.postgresql.Driver
+      url: jdbc:postgresql://127.0.0.1:5432/healthcare_analytics_competition
+      username: postgres
+      password: SHXshx520520!
+
+    finance_pgsql:
+      driver-class-name: org.postgresql.Driver
+      url: jdbc:postgresql://127.0.0.1:5432/financial_asset_management
+      username: postgres
+      password: SHXshx520520!
+
+mybatis-plus:
+  type-aliases-package: com.intelligent_data_analysis_system.domain
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+
+logging:
+  level:
+    com.intelligent_data_analysis_system: info
+
+# =============================
+# 关键：先选底层数据库类型，再按业务域路由
+# =============================
+app:
+  routing:
+    # mysql / pg
+    dbms: mysql
+
+    domains:
+      finance: finance
+      healthcare: healthcare
