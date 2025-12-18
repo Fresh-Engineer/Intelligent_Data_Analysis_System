@@ -54,10 +54,15 @@ logging:
 app:
   routing:
     # mysql / pg
-    dbms: pg
+    dbms: mysql
 
     domains:
       finance: finance
       healthcare: healthcare
   ai:
-    mode: stub
+    mode: jiutian
+
+  jiutian:
+    base-url: ${JIUTIAN_API_URL}
+    api-key: ${JIUTIAN_API_KEY}
+    model: ${JIUTIAN_MODEL_NAME}  # 你平台里实际的模型名

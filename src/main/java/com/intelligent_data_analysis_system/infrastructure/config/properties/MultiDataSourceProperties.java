@@ -3,7 +3,6 @@ package com.intelligent_data_analysis_system.infrastructure.config.properties;
 import jakarta.annotation.PostConstruct;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.stereotype.Component;
 
 @Data
 @ConfigurationProperties(prefix = "spring.datasource")

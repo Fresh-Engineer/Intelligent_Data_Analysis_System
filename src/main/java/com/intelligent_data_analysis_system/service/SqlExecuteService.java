@@ -26,6 +26,27 @@ public class SqlExecuteService {
         this.namedJdbc = namedJdbc;
     }
 
+    public List<Map<String, Object>> query(String domain, String sql) {
+        DomainContext.set(DataSourceDomain.valueOf(domain));
+        try {
+            return query(domain, sql, Collections.emptyMap());
+        } finally {
+            DomainContext.clear();
+        }
+    }
+
+    public List<Map<String, Object>> query(String domain,
+                                           String sql,
+                                           Map<String, ?> params) {
+        DomainContext.set(DataSourceDomain.valueOf(domain));
+        try {
+            return namedJdbc.queryForList(sql, params);
+        } finally {
+            DomainContext.clear();
+        }
+    }
+
+
     /**
      * 统一执行入口（给 controller / agent 用）
      * body 支持字段：
@@ -134,4 +155,6 @@ public class SqlExecuteService {
         }
         throw new IllegalArgumentException("params 必须是 JSON object / Map");
     }
+
+
 }
