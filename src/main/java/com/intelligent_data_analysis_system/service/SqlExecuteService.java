@@ -2,12 +2,15 @@ package com.intelligent_data_analysis_system.service;
 
 import com.intelligent_data_analysis_system.infrastructure.datasource.DomainContext;
 import com.intelligent_data_analysis_system.infrastructure.datasource.DataSourceDomain;
-import com.intelligent_data_analysis_system.utils.SqlGuard;
+import com.intelligent_data_analysis_system.infrastructure.runner.dto.QueryResult;
+import com.intelligent_data_analysis_system.utils.Generator.SqlGuard;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.ColumnMapRowMapper;
+import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.sql.ResultSetMetaData;
 import java.util.*;
 
 @Service
@@ -156,5 +159,52 @@ public class SqlExecuteService {
         throw new IllegalArgumentException("params 必须是 JSON object / Map");
     }
 
+    public QueryResult execute(String domain, String sql, Map<String, ?> params, int limit) {
+        QueryResult qr = new QueryResult();
+        long t0 = System.currentTimeMillis();
+
+        // 读库路由（你现有的 query 用的是 DataSourceDomain.valueOf(domain)，这里保持一致）
+        DomainContext.set(DataSourceDomain.valueOf(domain));
+        try {
+            if (sql == null || sql.isBlank()) {
+                throw new IllegalArgumentException("sql 为空");
+            }
+            SqlGuard.validateReadOnlySingleStatement(sql);
+
+            String safeSql = SqlGuard.ensureLimit(sql, limit);
+
+            ResultSetExtractor<QueryResult> extractor = rs -> {
+                ResultSetMetaData md = rs.getMetaData();
+                int cc = md.getColumnCount();
+
+                for (int i = 1; i <= cc; i++) {
+                    qr.getColumns().add(md.getColumnLabel(i));
+                }
+                while (rs.next()) {
+                    List<Object> row = new ArrayList<>(cc);
+                    for (int i = 1; i <= cc; i++) {
+                        row.add(rs.getObject(i));
+                    }
+                    qr.getRows().add(row);
+                }
+                return qr;
+            };
+
+            namedJdbc.query(safeSql, (params == null ? Map.of() : params), extractor);
+
+            qr.setSuccess(true);
+            qr.setStatus("success");
+            return qr;
+
+        } catch (Exception e) {
+            qr.setSuccess(false);
+            qr.setStatus("fail");
+            qr.setErrorMsg(e.getMessage());
+            return qr;
+        } finally {
+            qr.setElapsedMs(System.currentTimeMillis() - t0);
+            DomainContext.clear();
+        }
+    }
 
 }

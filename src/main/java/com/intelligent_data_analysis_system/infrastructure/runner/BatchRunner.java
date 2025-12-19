@@ -3,13 +3,21 @@ package com.intelligent_data_analysis_system.infrastructure.runner;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.intelligent_data_analysis_system.infrastructure.runner.dto.ProblemItem;
+import com.intelligent_data_analysis_system.infrastructure.runner.dto.QueryResult;
 import com.intelligent_data_analysis_system.service.*;
 import com.intelligent_data_analysis_system.utils.*;
 import com.intelligent_data_analysis_system.service.SqlExecuteService;
+import com.intelligent_data_analysis_system.utils.Fixer.FinanceProjectionFixer;
+import com.intelligent_data_analysis_system.utils.Fixer.HealthcareProjectionFixer;
+import com.intelligent_data_analysis_system.utils.Generator.SqlGenResult;
+import com.intelligent_data_analysis_system.utils.Generator.SqlGenerator;
+import com.intelligent_data_analysis_system.utils.Generator.SqlGuard;
+import com.intelligent_data_analysis_system.utils.Pruner.QueryResultPruner;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 
@@ -21,12 +29,17 @@ import java.util.*;
 
 @Component
 @RequiredArgsConstructor
+@ConditionalOnProperty(name = "app.batch.enabled", havingValue = "true")
 public class BatchRunner implements CommandLineRunner {
 
     private final ObjectMapper objectMapper;
     private final SqlGenerator sqlGenerator;           // 现在是 Stub，将来换成 LLM 版
     private final SqlExecuteService sqlExecuteService;
     private final AnswerRenderer answerRenderer;
+    private final ResultNormalizer resultNormalizer;
+    private final SqlSelfCheckService sqlSelfCheckService;
+    private final AiText2SqlService aiText2SqlService;
+
 
     private static final int EXCEL_CELL_MAX = 32767;
 
@@ -67,11 +80,11 @@ public class BatchRunner implements CommandLineRunner {
         all.addAll(loadFromClasspath("static/merge_sql_problems2.json", "HEALTHCARE"));
 
         String[] headers = {
-                "id","level","domain","problem",
-                "gold_sql","pred_sql",
-                "gold_answer","pred_answer",
+                "id", "level", "domain", "problem",
+                "gold_sql", "pred_sql",
+                "gold_answer", "pred_answer",
                 "is_correct",
-                "status","error_msg"
+                "status", "error_msg"
         };
 
         try (Workbook workbook = new XSSFWorkbook()) {
@@ -121,21 +134,90 @@ public class BatchRunner implements CommandLineRunner {
                     if (!goldSql.isBlank()) {
                         SqlGuard.validateReadOnlySingleStatement(goldSql);
                         List<Map<String, Object>> goldRows = sqlExecuteService.query(domain, goldSql);
-
-                        goldCanon = ResultCanonicalizer.canonicalize(goldRows);
-                        goldAnsShow = answerRenderer.render(problem, goldRows);
+                        // 1️⃣ rows → QueryResult
+                        QueryResult goldQr = toQueryResult(goldRows);
+                        // 2️⃣ 统一口径：只用 ResultNormalizer
+                        String goldAnswer = resultNormalizer.normalize(problem, goldSql, goldQr);
+                        // 3️⃣ 判分 & 写 Excel 都用同一个值
+                        goldCanon = goldAnswer;
+                        goldAnsShow = goldAnswer;
                     }
 
                     // 2) pred 生成 + 执行
-                    SqlGenResult gen = sqlGenerator.generate(problem);
-                    predSql = gen.getSql() == null ? "" : gen.getSql().trim();
-                    if (predSql.isBlank()) throw new IllegalStateException("pred_sql为空");
+                    SqlGenResult gen = sqlGenerator.generate(domain, problem);
+                    predSql = (gen.getSql() == null) ? "" : gen.getSql().trim();
+                    if (predSql.isBlank()) {
+                        predSql = RuleFallback.tryBuild(domain, problem);
+                        if (predSql.isBlank()) {
+                            status = "fail";
+                            error = "pred_sql为空（LLM + rule fallback 均失败）";
+                            continue;
+                        }
+                    }
 
+                    String originalSql = predSql;
                     SqlGuard.validateReadOnlySingleStatement(predSql);
-                    List<Map<String, Object>> predRows = sqlExecuteService.query(domain, predSql);
+                    // ===== 新增：SQL 结构自检 =====
+                    SqlSelfCheckService.CheckResult check =
+                            sqlSelfCheckService.check(problem, predSql);
 
-                    predCanon = ResultCanonicalizer.canonicalize(predRows);
-                    predAnsShow = answerRenderer.render(problem, predRows);
+                    if (!check.ok) {
+                        // 只重写一次
+                        SqlGenResult retry = aiText2SqlService.rewriteWithHint(
+                                domain, problem, predSql, check.hint
+                        );
+                        if (retry != null && retry.getSql() != null && !retry.getSql().isBlank()) {
+                            predSql = retry.getSql().trim();
+                            SqlGuard.validateReadOnlySingleStatement(predSql);
+                        }
+                    }
+                    // finance 投影兜底：放在执行前
+                    if ("FINANCE".equalsIgnoreCase(domain)) {
+                        predSql = FinanceProjectionFixer.fix(problem, predSql);
+                    }
+                    if ("HEALTHCARE".equalsIgnoreCase(domain)) {
+                        predSql = HealthcareProjectionFixer.fix(problem, predSql);
+                    }
+
+
+                    predSql = SqlPatchPipeline.apply(domain, problem, predSql, check);
+
+
+                    // ===== 执行 =====
+                    List<Map<String, Object>> predRows;
+                    try {
+                        predRows = sqlExecuteService.query(domain, predSql);
+                    } catch (Exception e) {
+                        String aliased = SqlExceptionRepair.tryAliasRepair(domain, predSql, e);
+                        if (!aliased.equals(predSql)) {
+                            predSql = aliased;
+                            predRows = sqlExecuteService.query(domain, predSql);
+                        } else {
+                            String repaired = SqlExceptionRepair.tryRepair(predSql, e);
+                            if (!repaired.equals(predSql)) {
+                                predSql = repaired;
+                                predRows = sqlExecuteService.query(domain, predSql);
+                            } else {
+                                throw e;
+                            }
+                        }
+                    }
+
+
+
+                    // ===== normalize =====
+                    QueryResult predQr = toQueryResult(predRows);
+
+                    // ✅ 结果级裁剪：不动 SQL，降低误伤风险
+                    predQr = QueryResultPruner.pruneByIntent(domain, problem, predQr);
+
+                    String predAnswer = resultNormalizer.normalize(problem, predSql, predQr);
+
+
+                    // 3️⃣ 判分 & 写 Excel 统一口径
+                    predCanon = predAnswer;
+                    predAnsShow = predAnswer;
+
 
                     // 3) 判分：canon 严格对比
                     isCorrect = !goldCanon.isBlank() && goldCanon.equals(predCanon);
@@ -143,7 +225,7 @@ public class BatchRunner implements CommandLineRunner {
                     status = "success";
                 } catch (Exception ex) {
                     status = "fail";
-                    error = ex.getMessage() == null ? ex.toString() : ex.getMessage();
+                    error = ex.getClass().getSimpleName() + ": " + ex.getMessage();
                 }
 
                 long t1 = System.currentTimeMillis();
@@ -215,9 +297,7 @@ public class BatchRunner implements CommandLineRunner {
     }
 
 
-
-    private List<ProblemItem> loadFromClasspath(String classpath, String domainFromFile) throws Exception
-    {
+    private List<ProblemItem> loadFromClasspath(String classpath, String domainFromFile) throws Exception {
         ClassPathResource res = new ClassPathResource(classpath);
         try (InputStream in = res.getInputStream()) {
             String txt = new String(in.readAllBytes());
@@ -225,16 +305,19 @@ public class BatchRunner implements CommandLineRunner {
 
             // 1) 顶层是数组：直接读
             if (txt.startsWith("[")) {
-                return objectMapper.readValue(txt, new TypeReference<List<ProblemItem>>() {});
+                return objectMapper.readValue(txt, new TypeReference<List<ProblemItem>>() {
+                });
             }
 
             // 2) 顶层是对象：可能是 {data:[...]} 或 {初级:[...],中级:[...],高级:[...]}
-            Map<String, Object> root = objectMapper.readValue(txt, new TypeReference<Map<String, Object>>() {});
+            Map<String, Object> root = objectMapper.readValue(txt, new TypeReference<Map<String, Object>>() {
+            });
 
             // 2.1 data 模式
             if (root.containsKey("data")) {
                 String dataJson = objectMapper.writeValueAsString(root.get("data"));
-                return objectMapper.readValue(dataJson, new TypeReference<List<ProblemItem>>() {});
+                return objectMapper.readValue(dataJson, new TypeReference<List<ProblemItem>>() {
+                });
             }
 
             // 2.2 分级模式：初级/中级/高级
@@ -243,7 +326,8 @@ public class BatchRunner implements CommandLineRunner {
                 Object v = root.get(lvl);
                 if (v instanceof List<?> list) {
                     String arrJson = objectMapper.writeValueAsString(list);
-                    List<ProblemItem> items = objectMapper.readValue(arrJson, new TypeReference<List<ProblemItem>>() {});
+                    List<ProblemItem> items = objectMapper.readValue(arrJson, new TypeReference<List<ProblemItem>>() {
+                    });
                     // 写入 level（如果你加了字段）
                     for (ProblemItem it : items) {
                         it.setLevel(lvl);
@@ -260,7 +344,8 @@ public class BatchRunner implements CommandLineRunner {
                     Object v = e.getValue();
                     if (v instanceof List<?> list && !list.isEmpty() && list.get(0) instanceof Map) {
                         String arrJson = objectMapper.writeValueAsString(list);
-                        List<ProblemItem> items = objectMapper.readValue(arrJson, new TypeReference<List<ProblemItem>>() {});
+                        List<ProblemItem> items = objectMapper.readValue(arrJson, new TypeReference<List<ProblemItem>>() {
+                        });
                         for (ProblemItem it : items) {
                             it.setLevel(e.getKey());
                             it.setDomain(domainFromFile);
@@ -289,6 +374,32 @@ public class BatchRunner implements CommandLineRunner {
         return mode;
     }
 
+    private QueryResult toQueryResult(List<Map<String, Object>> rows) {
+        QueryResult qr = new QueryResult();
+        qr.setSuccess(true);
+        qr.setStatus("success");
+
+        if (rows == null || rows.isEmpty()) {
+            qr.setColumns(new ArrayList<>());
+            qr.setRows(new ArrayList<>());
+            return qr;
+        }
+
+        // 列顺序：按第一行的 key 顺序（JdbcTemplate 默认 LinkedHashMap）
+        List<String> cols = new ArrayList<>(rows.get(0).keySet());
+        qr.setColumns(cols);
+
+        List<List<Object>> data = new ArrayList<>();
+        for (Map<String, Object> r : rows) {
+            List<Object> one = new ArrayList<>(cols.size());
+            for (String c : cols) {
+                one.add(r.get(c));
+            }
+            data.add(one);
+        }
+        qr.setRows(data);
+        return qr;
+    }
 
 
 }

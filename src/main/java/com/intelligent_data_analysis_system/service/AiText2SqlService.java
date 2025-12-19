@@ -1,12 +1,16 @@
 package com.intelligent_data_analysis_system.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.intelligent_data_analysis_system.utils.Generator.SqlGenResult;
+import com.intelligent_data_analysis_system.utils.Generator.SqlGenerator;
+import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
 
 @Service
+@RequiredArgsConstructor
 public class AiText2SqlService {
 
     @Value("${app.routing.dbms}")
@@ -16,6 +20,7 @@ public class AiText2SqlService {
     private String aiMode;
 
     private final ObjectMapper mapper = new ObjectMapper();
+    private final SqlGenerator sqlGenerator;   // ✅ 新增：注入你已有的生成器（Jiutian/Stub）
 
     public Map<String, Object> nl2sql(String question) {
         if (question == null || question.isBlank()) {
@@ -153,4 +158,32 @@ public class AiText2SqlService {
             throw new IllegalArgumentException("LLM输出不是合法JSON（需要单行JSON）。输出=" + text, e);
         }
     }
+
+    public SqlGenResult rewriteWithHint(
+            String domain,
+            String problem,
+            String badSql,
+            String hint
+    ) {
+        String rewritePrompt = """
+            原始问题：
+            %s
+
+            之前生成的 SQL：
+            %s
+
+            问题说明：
+            %s
+
+            请在【保持问题语义不变】的前提下，仅修正 SQL 结构错误。
+            要求：
+            1. 只输出一条 SELECT SQL
+            2. 不要解释
+            3. 不要使用 markdown
+            """.formatted(problem, badSql, hint);
+
+        // 直接复用你已有的 LLM 生成链路
+        return sqlGenerator.generate(domain, rewritePrompt);
+    }
+
 }

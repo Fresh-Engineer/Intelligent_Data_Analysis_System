@@ -1,4 +1,4 @@
-package com.intelligent_data_analysis_system.utils;
+package com.intelligent_data_analysis_system.utils.Generator;
 
 import java.util.Locale;
 import java.util.regex.Pattern;

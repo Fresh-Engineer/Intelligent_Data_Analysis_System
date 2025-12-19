@@ -1,4 +1,4 @@
-package com.intelligent_data_analysis_system.utils;
+package com.intelligent_data_analysis_system.utils.Generator;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;
