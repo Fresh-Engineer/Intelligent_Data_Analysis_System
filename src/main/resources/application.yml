@@ -1,5 +1,5 @@
 server:
-  port: 8090
+  port: 8010
 
 spring:
   profiles:
@@ -35,6 +35,19 @@ spring:
       username: ${USERNAME_PGSQL}
       password: ${PWD_PGSQL}
 
+    # MongoDB
+    healthcare_mongoDB:
+      driver-class-name: mongoDB
+      url: ${HEALTH_CARE_MONGODB}
+      username: ${USERNAME_MONGODB}
+      password: ${PWD_MONGODB}
+
+    finance_mongoDB:
+      driver-class-name: mongoDB
+      url: ${FINANCE_MONGODB}
+      username: ${USERNAME_MONGODB}
+      password: ${PWD_MONGODB}
+
 mybatis-plus:
   type-aliases-package: com.intelligent_data_analysis_system.domain
   configuration:
@@ -53,19 +66,27 @@ logging:
 # =============================
 app:
   routing:
-    # mysql / pg
+    # mysql / pg / mongodb
     dbms: mysql
 
     domains:
       finance: finance
       healthcare: healthcare
   ai:
-    mode: jiutian
+    # jiutian/qwen
+    mode: qwen
+  query:
+    max-rows: 200
 
   jiutian:
     base-url: ${JIUTIAN_API_URL}
     api-key: ${JIUTIAN_API_KEY}
-    model: ${JIUTIAN_MODEL_NAME}  # 你平台里实际的模型名
+    model: ${JIUTIAN_MODEL_NAME}
+
+  qwen:
+    base-url: ${QWEN_API_URL}
+    api-key: ${QWEN_API_KEY}
+    model: ${QWEN_MODEL_NAME}
 
   batch:
-    enabled: true
+    enabled: false

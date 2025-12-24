@@ -9,12 +9,22 @@ import org.springframework.stereotype.Service;
 import javax.sql.DataSource;
 import java.sql.*;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 @RequiredArgsConstructor
 public class SchemaTextProvider {
 
     private final DataSource dataSource; // 动态数据源最终返回的 DataSource（你现在已能按 domain 切）
+    
+    // Schema 缓存，key: domain_maxTables_maxColsPerTable
+    private final Map<String, String> schemaCache = new ConcurrentHashMap<>();
+    
+    // 缓存过期时间（毫秒）
+    private static final long CACHE_EXPIRY_TIME = 10 * 60 * 1000; // 10分钟
+    
+    // 缓存条目的过期时间记录
+    private final Map<String, Long> cacheExpiryTimes = new ConcurrentHashMap<>();
 
     /**
      * 生成紧凑 schemaText：TABLE t (col TYPE [PK] [FK -> x.y], ...)
@@ -23,6 +33,49 @@ public class SchemaTextProvider {
      * @param maxColsPerTable 每表最多多少列（防止太长）
      */
     public String getSchemaText(String domain, int maxTables, int maxColsPerTable) {
+        // 生成缓存键
+        String cacheKey = generateCacheKey(domain, maxTables, maxColsPerTable);
+        
+        // 检查缓存是否有效
+        if (isCacheValid(cacheKey)) {
+            return schemaCache.get(cacheKey);
+        }
+        
+        // 缓存无效，重新生成schema
+        String schemaText = generateSchemaText(domain, maxTables, maxColsPerTable);
+        
+        // 更新缓存
+        if (!schemaText.isEmpty()) {
+            schemaCache.put(cacheKey, schemaText);
+            cacheExpiryTimes.put(cacheKey, System.currentTimeMillis() + CACHE_EXPIRY_TIME);
+        }
+        
+        return schemaText;
+    }
+    
+    /**
+     * 生成缓存键
+     */
+    private String generateCacheKey(String domain, int maxTables, int maxColsPerTable) {
+        return domain + "_" + maxTables + "_" + maxColsPerTable;
+    }
+    
+    /**
+     * 检查缓存是否有效
+     */
+    private boolean isCacheValid(String cacheKey) {
+        if (!schemaCache.containsKey(cacheKey) || !cacheExpiryTimes.containsKey(cacheKey)) {
+            return false;
+        }
+        
+        long expiryTime = cacheExpiryTimes.get(cacheKey);
+        return System.currentTimeMillis() < expiryTime;
+    }
+    
+    /**
+     * 实际生成schemaText的方法
+     */
+    private String generateSchemaText(String domain, int maxTables, int maxColsPerTable) {
         DomainContext.set(DataSourceDomain.valueOf(domain));
         try (Connection conn = dataSource.getConnection()) {
             DatabaseMetaData md = conn.getMetaData();
@@ -34,8 +87,10 @@ public class SchemaTextProvider {
             try (ResultSet rs = md.getTables(catalog, schema, "%", new String[]{"TABLE"})) {
                 while (rs.next()) {
                     String t = rs.getString("TABLE_NAME");
-                    // 你也可以在这里过滤系统表/日志表等
-                    tables.add(t);
+                    // 过滤系统表和日志表
+                    if (!t.startsWith("pg_") && !t.endsWith("_log") && !t.endsWith("_logs")) {
+                        tables.add(t);
+                    }
                 }
             }
             Collections.sort(tables);

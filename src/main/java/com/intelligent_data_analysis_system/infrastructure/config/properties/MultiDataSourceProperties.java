@@ -10,8 +10,11 @@ public class MultiDataSourceProperties {
 
     private DbProps financeMysql;
     private DbProps financePgsql;
+    private DbProps financeMongoDB;
     private DbProps healthcareMysql;
     private DbProps healthcarePgsql;
+    private DbProps healthcareMongoDB;
+
 
     @Data
     public static class DbProps {
@@ -27,6 +30,8 @@ public class MultiDataSourceProperties {
         System.out.println("healthcarePg=" + healthcarePgsql);
         System.out.println("financeMysql=" + financeMysql);
         System.out.println("healthcareMysql=" + healthcareMysql);
+        System.out.println("financeMongoDB=" + financeMongoDB);
+        System.out.println("healthcareMongoDB=" + healthcareMongoDB);
     }
 
 }

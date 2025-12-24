@@ -7,6 +7,7 @@ import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.Select;
 
+@SuppressWarnings("deprecation")
 public class SqlWherePatcher {
 
     public static String addConditionSafely(String sql, String cond) {

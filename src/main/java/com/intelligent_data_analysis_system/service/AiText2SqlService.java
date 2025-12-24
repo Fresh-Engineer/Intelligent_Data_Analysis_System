@@ -1,146 +1,113 @@
 package com.intelligent_data_analysis_system.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.intelligent_data_analysis_system.infrastructure.exception.BusinessException;
 import com.intelligent_data_analysis_system.utils.Generator.SqlGenResult;
 import com.intelligent_data_analysis_system.utils.Generator.SqlGenerator;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.util.*;
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class AiText2SqlService {
 
+    private static final String DOMAIN_FINANCE = "FINANCE";
+    private static final String DOMAIN_HEALTHCARE = "HEALTHCARE";
+
     @Value("${app.routing.dbms}")
     private String defaultDbms;
 
-    @Value("${app.ai.mode}")
+    @Value("${app.ai.mode:stub}")
     private String aiMode;
 
-    private final ObjectMapper mapper = new ObjectMapper();
-    private final SqlGenerator sqlGenerator;   // ✅ 新增：注入你已有的生成器（Jiutian/Stub）
+    private final ObjectMapper mapper;     // ✅ 用 Spring 注入的 ObjectMapper
+    private final SqlGenerator sqlGenerator; // ✅ 注入接口：qwen/jiutian 由条件化实现决定
 
     public Map<String, Object> nl2sql(String question) {
-        if (question == null || question.isBlank()) {
-            throw new IllegalArgumentException("question不能为空");
-        }
-
-        // 1) 选 domain（先用关键词路由，后面可让 LLM 输出）
-        String domain = routeDomainByKeyword(question);
-
-        // 2) dbms 默认走你已有配置
+        String domain = routeDomainByKeywordEnum(question); // FINANCE/HEALTHCARE
         String dbms = defaultDbms;
-
-        // 3) schema hint（先最简；后面可自动从信息表读）
-        String schema = getSchemaHint(domain);
-
-        // 4) prompt（未来 llm 模式用）
-        String prompt = buildPrompt(question, domain, dbms, schema);
-
-        // 5) 调用 LLM（现在 stub，未来接九天）
-        String out = callLLM(prompt, question, domain, dbms);
-
-        // 6) 解析为 Map（要求单行 JSON）
-        Map<String, Object> plan = parseJsonSafely(out);
-
-        // 兜底补全
-        plan.putIfAbsent("domain", domain);
-        plan.putIfAbsent("dbms", dbms);
-        plan.putIfAbsent("maxRows", 200);
-
-        return plan;
+        return nl2sql(question, domain, dbms);
     }
 
-    private String routeDomainByKeyword(String q) {
-        String s = q.toLowerCase(Locale.ROOT);
-        if (s.contains("资产") || s.contains("产品") || s.contains("客户") || s.contains("交易") || s.contains("组合")) {
-            return "finance";
-        }
-        if (s.contains("患者") || s.contains("就诊") || s.contains("科室") || s.contains("病历") || s.contains("医院")) {
-            return "healthcare";
-        }
-        return "finance";
-    }
+    private String routeDomainByKeywordEnum(String q) {
+        String s = (q == null ? "" : q).toLowerCase(Locale.ROOT);
 
-    private String getSchemaHint(String domain) {
-        if ("healthcare".equalsIgnoreCase(domain)) {
-            return """
-            Tables:
-            - patients(patient_id, name, gender, age, ...)
-            - visits(visit_id, patient_id, visit_date, dept_id, ...)
-            - departments(dept_id, dept_name, parent_id, ...)
-            """;
-        }
-        return """
-        Tables:
-        - clients(client_id, client_name, client_type, risk_level, total_assets, status, ...)
-        - products(product_id, product_name, product_type, risk_rating, currency, ...)
-        - portfolios(portfolio_id, portfolio_code, client_id, portfolio_type, current_value, contribution_amount, ...)
-        - transactions(transaction_id, portfolio_id, product_id, trade_date, transaction_type, transaction_amount, ...)
-        """;
-    }
-
-    private String buildPrompt(String question, String domain, String dbms, String schema) {
-        return """
-        You are a text-to-SQL engine for an analytics system.
-
-        Output MUST be a single-line JSON object with keys: domain, dbms, sql, maxRows.
-        sql MUST be read-only (SELECT/WITH/EXPLAIN), no semicolons.
-        Use ONLY tables/columns from schema, do NOT invent columns.
-
-        Target domain: %s
-        Target dbms: %s
-
-        Schema:
-        %s
-
-        User question:
-        %s
-        """.formatted(domain, dbms, schema, question);
-    }
-
-    private String callLLM(String prompt, String question, String domain, String dbms) {
-        // ✅ 现在没 token：默认 stub
-        if (!"llm".equalsIgnoreCase(aiMode)) {
-            return stubToJson(question, domain, dbms);
+        // 医疗优先命中
+        if (s.contains("患者") || s.contains("就诊") || s.contains("科室") || s.contains("病历") || s.contains("医院")
+                || s.contains("处方") || s.contains("药品") || s.contains("检验") || s.contains("检查")) {
+            return "HEALTHCARE";
         }
 
-        // TODO：等官方给九天 token/API，把这里替换成真实调用即可
-        // return realLlmCall(prompt);
+        // 金融命中
+        if (s.contains("资产") || s.contains("客户") || s.contains("交易") || s.contains("基金")
+                || s.contains("理财") || s.contains("持仓") || s.contains("对手方")) {
+            return "FINANCE";
+        }
 
-        // 兜底：避免 llm 模式误开导致不可用
-        return stubToJson(question, domain, dbms);
+        return "FINANCE";
     }
 
-    private String stubToJson(String question, String domain, String dbms) {
-        String q = question == null ? "" : question.toLowerCase(Locale.ROOT);
 
-        String sql;
+    public Map<String, Object> nl2sql(String question, String domain, String dbms) {
         int maxRows = 200;
 
-        if ("healthcare".equalsIgnoreCase(domain)) {
-            if (q.contains("数量") || q.contains("多少") || q.contains("统计")) {
-                sql = "select count(*) as cnt from patients";
-                maxRows = 50;
-            } else {
-                sql = "select * from patients";
-                maxRows = 50;
-            }
-        } else {
-            if (q.contains("客户") && (q.contains("数量") || q.contains("统计") || q.contains("多少"))) {
-                sql = "select count(*) as cnt from clients";
-                maxRows = 50;
-            } else if (q.contains("前") && (q.contains("资产") || q.contains("总资产"))) {
-                sql = "select client_id, client_name, total_assets from clients order by total_assets desc";
-                maxRows = 10;
-            } else {
-                sql = "select 1 as ok";
-                maxRows = 1;
-            }
+        // LLM 模式：直接走当前注入的 generator（qwen/jiutian）
+        if ("qwen".equalsIgnoreCase(aiMode) || "jiutian".equalsIgnoreCase(aiMode)) {
+            SqlGenResult gen = sqlGenerator.generate(domain, question);
+
+            Map<String, Object> plan = new LinkedHashMap<>();
+            plan.put("domain", normalizeDomainEnumName(gen.getDomain())); // 防御：把 finance -> FINANCE
+            plan.put("dbms", dbms);
+            plan.put("sql", gen.getSql());
+            plan.put("maxRows", maxRows);
+            return plan;
         }
 
+        // 非 LLM 模式：stub
+        try {
+            return mapper.readValue(stubToJson(question, domain, dbms), Map.class);
+        } catch (Exception e) {
+            throw new BusinessException(400, "stub 生成失败: " + e.getMessage());
+        }
+    }
+
+    // ====== 自动判域：先关键词，后默认 FINANCE ======
+
+    private String detectDomainEnum(String question) {
+        if (question == null) return DOMAIN_FINANCE;
+        String q = question.trim().toLowerCase(Locale.ROOT);
+        if (q.isEmpty()) return DOMAIN_FINANCE;
+
+        // 医疗强特征
+        String[] hc = {"患者","病人","就诊","挂号","门诊","住院","出院","科室","医生","护士","处方","药品","药房","检验","检查","ct","mri","病历","医嘱","医保","床位","病房"};
+        for (String k : hc) if (q.contains(k)) return DOMAIN_HEALTHCARE;
+
+        // 金融强特征
+        String[] fin = {"客户","资产","净值","余额","账户","交易","流水","基金","股票","债券","理财","投资","收益","风险","评级","贷款","利率","持仓","对手方","申购","赎回","组合"};
+        for (String k : fin) if (q.contains(k)) return DOMAIN_FINANCE;
+
+        return DOMAIN_FINANCE;
+    }
+
+    private String normalizeDomainEnumName(String d) {
+        if (d == null) return DOMAIN_FINANCE;
+        String x = d.trim().toLowerCase(Locale.ROOT);
+        if ("finance".equals(x) || "FINANCE".equalsIgnoreCase(d)) return DOMAIN_FINANCE;
+        if ("healthcare".equals(x) || "HEALTHCARE".equalsIgnoreCase(d)) return DOMAIN_HEALTHCARE;
+        return d.trim().toUpperCase(Locale.ROOT);
+    }
+
+    // ====== 你的 stub 逻辑可保留（我这里只示意） ======
+    private String stubToJson(String question, String domain, String dbms) {
+        String sql = "select 1 as ok";
+        int maxRows = 1;
         return String.format(Locale.ROOT,
                 "{\"domain\":\"%s\",\"dbms\":\"%s\",\"sql\":\"%s\",\"maxRows\":%d}",
                 domain, dbms, escapeJson(sql), maxRows);
@@ -148,15 +115,6 @@ public class AiText2SqlService {
 
     private String escapeJson(String s) {
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
-    }
-
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> parseJsonSafely(String text) {
-        try {
-            return mapper.readValue(text, Map.class);
-        } catch (Exception e) {
-            throw new IllegalArgumentException("LLM输出不是合法JSON（需要单行JSON）。输出=" + text, e);
-        }
     }
 
     public SqlGenResult rewriteWithHint(

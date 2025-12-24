@@ -2,6 +2,7 @@ package com.intelligent_data_analysis_system.infrastructure.datasource;
 
 import com.baomidou.mybatisplus.extension.spring.MybatisSqlSessionFactoryBean;
 import com.intelligent_data_analysis_system.infrastructure.config.properties.MultiDataSourceProperties;
+import com.intelligent_data_analysis_system.infrastructure.config.properties.QueryProperties;
 import com.intelligent_data_analysis_system.infrastructure.config.properties.RoutingProperties;
 import com.zaxxer.hikari.HikariDataSource;
 import lombok.RequiredArgsConstructor;
@@ -17,7 +18,7 @@ import java.util.Map;
 
 @Configuration
 @RequiredArgsConstructor
-@EnableConfigurationProperties({RoutingProperties.class, MultiDataSourceProperties.class})
+@EnableConfigurationProperties({RoutingProperties.class, MultiDataSourceProperties.class, QueryProperties.class})
 public class DataSourceConfig {
 
     private final RoutingProperties routingProperties;

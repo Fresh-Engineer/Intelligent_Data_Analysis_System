@@ -17,12 +17,11 @@ import java.util.stream.Collectors;
 
 @RequiredArgsConstructor
 @Service
-@ConditionalOnProperty(name = "app.ai.mode", havingValue = "jiutian")
-public class JiutianSqlGenerator implements SqlGenerator {
+@ConditionalOnProperty(name = "app.ai.mode", havingValue = "qwen")
+public class QWenSqlGenerator implements SqlGenerator {
+    private static final Logger logger = LoggerFactory.getLogger(QWenSqlGenerator.class);
 
-    private static final Logger logger = LoggerFactory.getLogger(JiutianSqlGenerator.class);
-    
-    private final JiutianChatClient chatClient;
+    private final QWenChatClient chatClient;
     private final RoutingProperties routingProperties;
     private final SqlExecuteService sqlExecuteService; // ✅新增：用来查 schema（information_schema）
     private final SchemaTextProvider schemaTextProvider;
@@ -109,11 +108,11 @@ public class JiutianSqlGenerator implements SqlGenerator {
 
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             logger.info("Generating SQL for domain: {}, problem: {}, attempt: {}", domain, problem, attempt);
-            
+
             // 生成SQL
             String raw = chatClient.chat(system, prompt);
             sql = extractSql(raw);
-            
+
             logger.debug("Raw response: {}", raw);
             logger.debug("Extracted SQL: {}", sql);
 
@@ -121,7 +120,7 @@ public class JiutianSqlGenerator implements SqlGenerator {
             boolean syntaxValid = validateSql(sql);
             boolean schemaValid = validateSqlTableAndColumns(sql, domain);
             valid = syntaxValid && schemaValid;
-            
+
             logger.debug("SQL validation result - syntax: {}, schema: {}", syntaxValid, schemaValid);
 
             if (valid) {
@@ -130,17 +129,17 @@ public class JiutianSqlGenerator implements SqlGenerator {
             }
 
             // 验证失败，尝试修复
-            logger.warn("SQL validation failed on attempt {}, attempting repair. Syntax valid: {}, Schema valid: {}", 
-                       attempt, syntaxValid, schemaValid);
-            
+            logger.warn("SQL validation failed on attempt {}, attempting repair. Syntax valid: {}, Schema valid: {}",
+                    attempt, syntaxValid, schemaValid);
+
             repairedSql = repairSql(sql);
             logger.debug("Repaired SQL: {}", repairedSql);
-            
+
             // 验证修复后的SQL
             syntaxValid = validateSql(repairedSql);
             schemaValid = validateSqlTableAndColumns(repairedSql, domain);
             valid = syntaxValid && schemaValid;
-            
+
             logger.debug("Repaired SQL validation result - syntax: {}, schema: {}", syntaxValid, schemaValid);
 
             if (valid) {
@@ -160,7 +159,7 @@ public class JiutianSqlGenerator implements SqlGenerator {
                 break;
             }
         }
-        
+
         logger.info("Final SQL for domain: {}, problem: {} - {}", domain, problem, sql);
 
         return new SqlGenResult(domain, sql);
@@ -175,7 +174,9 @@ public class JiutianSqlGenerator implements SqlGenerator {
         return "PostgreSQL";
     }
 
-    private String buildPrompt(String problem, String domain, String dialect, String schema) {
+    public String buildPrompt(String problem, String domain, String dialect, String schema) {
+        // domain: FINANCE / HEALTHCARE
+        // dialect: mysql / pg
         return """
 【任务】将自然语言问题转换为SQL（Text-to-SQL）。
 
@@ -228,6 +229,7 @@ public class JiutianSqlGenerator implements SqlGenerator {
                 problem == null ? "" : problem.trim()
         );
     }
+
 
     /**
      * 从模型响应中提取SQL语句，增强健壮性以处理各种边缘情况
@@ -299,7 +301,7 @@ public class JiutianSqlGenerator implements SqlGenerator {
         if (sql == null || sql.trim().isEmpty()) {
             return false;
         }
-        
+
         try {
             // 使用JSqlParser解析SQL，检查语法错误
             net.sf.jsqlparser.parser.CCJSqlParserUtil.parse(sql);
@@ -309,7 +311,7 @@ public class JiutianSqlGenerator implements SqlGenerator {
             return false;
         }
     }
-    
+
     /**
      * 验证SQL中的表名和列名是否存在于数据库schema中
      * @param sql 要验证的SQL语句
@@ -320,18 +322,18 @@ public class JiutianSqlGenerator implements SqlGenerator {
         if (sql == null || sql.trim().isEmpty() || domain == null || domain.trim().isEmpty()) {
             return false;
         }
-        
+
         try {
             // 获取当前domain的schema信息
             String schemaText = schemaTextProvider.getSchemaText(domain, Integer.MAX_VALUE, Integer.MAX_VALUE);
-            
+
             // 解析SQL，提取表名和列名
             net.sf.jsqlparser.statement.select.Select select = (net.sf.jsqlparser.statement.select.Select) net.sf.jsqlparser.parser.CCJSqlParserUtil.parse(sql);
-            
+
             // 提取表名
             List<String> tables = new ArrayList<>();
             List<String> columns = new ArrayList<>();
-            
+
             if (select.getSelectBody() instanceof net.sf.jsqlparser.statement.select.PlainSelect plainSelect) {
                 // 使用直接获取表的方式替代已过时的TablesNamesFinder
                 if (plainSelect.getFromItem() instanceof net.sf.jsqlparser.schema.Table) {
@@ -345,7 +347,7 @@ public class JiutianSqlGenerator implements SqlGenerator {
                         }
                     }
                 }
-                
+
                 // 提取列名
                 for (var item : plainSelect.getSelectItems()) {
                     // 使用反射安全地获取表达式，避免依赖具体实现类
@@ -361,21 +363,21 @@ public class JiutianSqlGenerator implements SqlGenerator {
                     }
                 }
             }
-            
+
             // 检查表名是否存在于schema中
             for (String table : tables) {
                 if (!schemaText.contains(table)) {
                     return false;
                 }
             }
-            
+
             // 检查列名是否存在于schema中
             for (String column : columns) {
                 if (!schemaText.contains(column)) {
                     return false;
                 }
             }
-            
+
             return true;
         } catch (Exception e) {
             // 解析或验证失败，可能是复杂查询导致的，暂时返回true
@@ -392,62 +394,62 @@ public class JiutianSqlGenerator implements SqlGenerator {
         if (sql == null || sql.trim().isEmpty()) {
             return sql;
         }
-        
+
         String repaired = sql;
-        
+
         // 1. 修复日期格式：为没有引号的日期值添加单引号
         // 匹配YYYY-MM-DD格式的日期，但不包括已经在引号中的
         repaired = repaired.replaceAll("(?<!['\\w])\\b(\\d{4}-\\d{2}-\\d{2})\\b(?!['\\w])", "'$1'");
-        
+
         // 2. 修复年份函数：将YEAR(column)转换为EXTRACT(YEAR FROM column)
         repaired = repaired.replaceAll("(?i)YEAR\\s*\\(([^)]+)\\)", "EXTRACT(YEAR FROM $1)");
-        
+
         // 3. 修复月份函数：将MONTH(column)转换为EXTRACT(MONTH FROM column)
         repaired = repaired.replaceAll("(?i)MONTH\\s*\\(([^)]+)\\)", "EXTRACT(MONTH FROM $1)");
-        
+
         // 4. 修复日期函数：将DATE(column)转换为EXTRACT(DAY FROM column)（如果用于日期比较）
         repaired = repaired.replaceAll("(?i)DATE\\s*\\(([^)]+)\\)", "EXTRACT(DAY FROM $1)");
-        
+
         // 5. 修复引号问题：删除数值类型上的引号
         // 匹配'数字'模式，但不包括日期格式
         repaired = repaired.replaceAll("'\\b(\\d+(\\.\\d+)?)\\b'", "$1");
-        
+
         // 6. 修复不匹配的单引号（简单处理：确保单引号数量为偶数）
         int quoteCount = repaired.replaceAll("[^']", "").length();
         if (quoteCount % 2 != 0) {
             // 在字符串末尾添加单引号
             repaired = repaired + "'";
         }
-        
+
         // 7. 修复缺失的逗号：在表名和FROM关键字之间添加逗号
         repaired = repaired.replaceAll("(?i)([\\w_]+)\\s+FROM", "$1, FROM");
-        
+
         // 8. 修复错误的表连接语法：将逗号连接转换为INNER JOIN（简单情况）
-        repaired = repaired.replaceAll("(?i)FROM\\s+([\\w_]+)\\s*,\\s*([\\w_]+)\\s+WHERE\\s+([\\w_]+)\\.([\\w_]+)\\s*=\\s*([\\w_]+)\\.([\\w_]+)", 
-                                      "FROM $1 INNER JOIN $2 ON $3.$4 = $5.$6");
-        
+        repaired = repaired.replaceAll("(?i)FROM\\s+([\\w_]+)\\s*,\\s*([\\w_]+)\\s+WHERE\\s+([\\w_]+)\\.([\\w_]+)\\s*=\\s*([\\w_]+)\\.([\\w_]+)",
+                "FROM $1 INNER JOIN $2 ON $3.$4 = $5.$6");
+
         // 9. 修复重复的关键字
         repaired = repaired.replaceAll("(?i)(SELECT)\\s+\\1", "$1");
         repaired = repaired.replaceAll("(?i)(FROM)\\s+\\1", "$1");
         repaired = repaired.replaceAll("(?i)(WHERE)\\s+\\1", "$1");
-        
+
         // 10. 修复缺失的括号：确保函数调用有正确的括号
         repaired = repaired.replaceAll("(?i)COUNT\\s+([^\\(])(?![\\w\\s])", "COUNT($1)");
         repaired = repaired.replaceAll("(?i)SUM\\s+([^\\(])(?![\\w\\s])", "SUM($1)");
         repaired = repaired.replaceAll("(?i)AVG\\s+([^\\(])(?![\\w\\s])", "AVG($1)");
         repaired = repaired.replaceAll("(?i)MAX\\s+([^\\(])(?![\\w\\s])", "MAX($1)");
         repaired = repaired.replaceAll("(?i)MIN\\s+([^\\(])(?![\\w\\s])", "MIN($1)");
-        
+
         // 11. 修复错误的比较操作符：将= =转换为=
         repaired = repaired.replaceAll("=\\s*=", "=");
-        
+
         // 12. 修复缺失的表别名：在表名后添加简单别名
         repaired = repaired.replaceAll("(?i)FROM\\s+([\\w_]+)(?!\\s+AS|\\s+[\\w_])", "FROM $1 AS t1");
         repaired = repaired.replaceAll("(?i)JOIN\\s+([\\w_]+)(?!\\s+AS|\\s+[\\w_])", "JOIN $1 AS t2");
-        
+
         // 13. 修复错误的通配符：将*放在SELECT之后
         repaired = repaired.replaceAll("(?i)SELECT\\s+\\*\\s+(?![FROM])", "SELECT * FROM ");
-        
+
         return repaired;
     }
 
@@ -469,15 +471,15 @@ public class JiutianSqlGenerator implements SqlGenerator {
         List<Map<String, Object>> cols = sqlExecuteService.query(domain, columnsSql);
         List<Map<String, Object>> fks = sqlExecuteService.query(domain, fkSql);
 
-        Map<String, List<ColInfo>> tableCols = new LinkedHashMap<>();
+        Map<String, List<QWenSqlGenerator.ColInfo>> tableCols = new LinkedHashMap<>();
         for (Map<String, Object> r : cols) {
             String table = s(r.get("table_name"));
             String col = s(r.get("column_name"));
             String type = s(r.get("data_type"));
             if (table.isBlank() || col.isBlank()) continue;
-            tableCols.computeIfAbsent(table, k -> new ArrayList<>()).add(new ColInfo(col, type));
+            tableCols.computeIfAbsent(table, k -> new ArrayList<>()).add(new QWenSqlGenerator.ColInfo(col, type));
         }
-        for (List<ColInfo> list : tableCols.values()) {
+        for (List<QWenSqlGenerator.ColInfo> list : tableCols.values()) {
             list.sort(Comparator.comparing(a -> a.name));
         }
 
@@ -497,13 +499,13 @@ public class JiutianSqlGenerator implements SqlGenerator {
         int tableLimit = 120; // 防止 prompt 过长
         int tableCount = 0;
 
-        for (Map.Entry<String, List<ColInfo>> e : tableCols.entrySet()) {
+        for (Map.Entry<String, List<QWenSqlGenerator.ColInfo>> e : tableCols.entrySet()) {
             if (tableCount++ >= tableLimit) {
                 sb.append("... (more tables omitted)\n");
                 break;
             }
             String table = e.getKey();
-            List<ColInfo> list = e.getValue();
+            List<QWenSqlGenerator.ColInfo> list = e.getValue();
             String colsText = list.stream()
                     .map(c -> c.type.isBlank() ? c.name : (c.name + ":" + shortType(c.type)))
                     .collect(Collectors.joining(", "));
@@ -582,4 +584,5 @@ WHERE tc.constraint_type = 'FOREIGN KEY'
   AND tc.table_schema = 'public'
 ORDER BY kcu.table_name, kcu.column_name
 """;
+
 }

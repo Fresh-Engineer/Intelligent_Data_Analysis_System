@@ -11,43 +11,49 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
-public class JiutianChatClient {
-
+public class QWenChatClient {
     private final WebClient.Builder webClientBuilder;
     private final ObjectMapper objectMapper;
 
-    @Value("${app.jiutian.base-url}")
+    @Value("${app.qwen.base-url}")
     private String baseUrl;
 
-    @Value("${app.jiutian.api-key}")
+    @Value("${app.qwen.api-key}")
     private String apiKey;
 
-    @Value("${app.jiutian.model}")
+    @Value("${app.qwen.model}")
     private String model;
-    
+
     // 重试配置
-    @Value("${app.jiutian.max-retries:5}")
+    @Value("${app.qwen.max-retries:5}")
     private int maxRetries;
-    
-    @Value("${app.jiutian.retry-delay-ms:1000}")
+
+    @Value("${app.qwen.retry-delay-ms:1000}")
     private int retryDelayMs;
+
+    @Value("${app.qwen.timeout-seconds:60}")
+    private int timeoutSeconds;
 
     public String chat(List<Map<String, String>> messages) {
         int retryCount = 0;
         Exception lastException = null;
+
+        // ✅ 每次请求的硬超时（建议 30~90 秒）
+        Duration timeout = Duration.ofSeconds(timeoutSeconds);
 
         while (retryCount <= maxRetries) {
             try {
                 ObjectNode body = objectMapper.createObjectNode();
                 body.put("model", model);
                 body.put("max_tokens", 2048);
-                body.put("temperature", 0.0); // text2sql 强烈建议 0
+                body.put("temperature", 0.0);
                 body.put("stream", false);
 
                 ArrayNode msgs = body.putArray("messages");
@@ -65,18 +71,22 @@ public class JiutianChatClient {
                         .bodyValue(body)
                         .retrieve()
                         .bodyToMono(String.class)
-                        .block();
+                        // ✅ 关键：block 加超时，避免永远挂住
+                        .block(timeout);
 
+                if (resp == null || resp.isBlank()) {
+                    throw new RuntimeException("Empty response from QWen");
+                }
                 return extractContent(resp);
 
             } catch (Exception e) {
                 lastException = e;
                 retryCount++;
-                
-                // 如果不是最后一次重试，等待后继续
+
                 if (retryCount <= maxRetries) {
                     try {
-                        Thread.sleep(retryDelayMs * (1 << retryCount)); // 指数退避
+                        long sleepMs = (long) retryDelayMs * (1L << retryCount); // 指数退避
+                        Thread.sleep(sleepMs);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         break;
@@ -84,9 +94,8 @@ public class JiutianChatClient {
                 }
             }
         }
-        
-        // 所有重试都失败
-        throw new RuntimeException("Jiutian API call failed after " + maxRetries + " retries", lastException);
+
+        throw new RuntimeException("QWen API call failed after " + maxRetries + " retries", lastException);
     }
 
     public String chat(String systemContent, String userContent) {
@@ -104,23 +113,22 @@ public class JiutianChatClient {
 
             // 1) 先处理错误
             if (root.has("error")) {
-                return "[JIUTIAN_ERROR] " + root.get("error").toString();
+                return "[QWen_ERROR] " + root.get("error").toString();
             }
 
             // 2) 正常 choices[0].message.content
             JsonNode choices = root.get("choices");
             if (choices == null || !choices.isArray() || choices.isEmpty()) {
-                return "[JIUTIAN_BAD_RESPONSE] " + resp;
+                return "[QWen_BAD_RESPONSE] " + resp;
             }
 
             JsonNode msg = choices.get(0).get("message");
             if (msg == null || msg.get("content") == null) {
-                return "[JIUTIAN_BAD_RESPONSE] " + resp;
+                return "[QWen_BAD_RESPONSE] " + resp;
             }
             return msg.get("content").asText("");
         } catch (Exception e) {
-            return "[JIUTIAN_PARSE_FAIL] " + resp;
+            return "[QWen_PARSE_FAIL] " + resp;
         }
     }
-
 }
