@@ -3,25 +3,32 @@ package com.intelligent_data_analysis_system.service;
 import com.intelligent_data_analysis_system.infrastructure.datasource.DomainContext;
 import com.intelligent_data_analysis_system.infrastructure.datasource.DataSourceDomain;
 import com.intelligent_data_analysis_system.infrastructure.exception.BusinessException;
-import com.intelligent_data_analysis_system.infrastructure.runner.dto.QueryResult;
 import com.intelligent_data_analysis_system.utils.Generator.SqlGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.ColumnMapRowMapper;
-import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
 
-import java.sql.ResultSetMetaData;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 import java.util.*;
 
 @Service
 public class SqlExecuteService {
 
     private static final Logger logger = LoggerFactory.getLogger(SqlExecuteService.class);
-    
+
     private final NamedParameterJdbcTemplate namedJdbc;
+    private final MongoTemplate financeMongoTemplate;
+    private final MongoTemplate healthcareMongoTemplate;
 
     /**
      * 你仓库里已经有 app.routing.dbms（mysql / pgsql），这里直接复用。
@@ -30,8 +37,12 @@ public class SqlExecuteService {
     @Value("${app.routing.dbms}")
     private String defaultDbms;
 
-    public SqlExecuteService(NamedParameterJdbcTemplate namedJdbc) {
+    public SqlExecuteService(NamedParameterJdbcTemplate namedJdbc,
+                             @Qualifier("financeMongoTemplate") MongoTemplate financeMongoTemplate,
+                             @Qualifier("healthcareMongoTemplate") MongoTemplate healthcareMongoTemplate) {
         this.namedJdbc = namedJdbc;
+        this.financeMongoTemplate = financeMongoTemplate;
+        this.healthcareMongoTemplate = healthcareMongoTemplate;
     }
 
     public List<Map<String, Object>> query(String domain, String sql) {
@@ -83,70 +94,80 @@ public class SqlExecuteService {
         DomainContext.set(dsDomain);
         try {
             Map<String, Object> params = asMap(body.get("params"));
-            
+
             // 设置重试次数
-        int maxRetries = 3;
-        String sql = originalSql;
-        
-        for (int attempt = 1; attempt <= maxRetries; attempt++) {
-            logger.info("Executing SQL for domain: {}, attempt: {}", domain, attempt);
-            logger.debug("SQL to execute: {}", sql);
-            
-            try {
-                // 确保有LIMIT子句
-                String sqlWithLimit = SqlGuard.ensureLimit(sql, maxRows);
-                logger.debug("SQL with limit: {}", sqlWithLimit);
-                
-                // 尝试执行SQL
-                List<Map<String, Object>> rows = 
-                        namedJdbc.query(sqlWithLimit, params, new ColumnMapRowMapper());
+            int maxRetries = 3;
+            String sql = originalSql;
 
-                List<String> columns = rows.isEmpty()
-                        ? List.of()
-                        : new ArrayList<>(rows.get(0).keySet());
+            for (int attempt = 1; attempt <= maxRetries; attempt++) {
+                logger.info("Executing SQL for domain: {}, attempt: {}", domain, attempt);
+                logger.debug("SQL to execute: {}", sql);
 
-                long elapsed = System.currentTimeMillis() - t0;
-                logger.info("SQL executed successfully for domain: {}, rows returned: {}, time: {}ms", 
-                           domain, rows.size(), elapsed);
+                try {
+                    // 确保有 LIMIT 子句
+                    String sqlWithLimit = SqlGuard.ensureLimit(sql, maxRows);
+                    logger.debug("SQL with limit: {}", sqlWithLimit);
 
-                Map<String, Object> resp = new LinkedHashMap<>();
-                resp.put("dataSource", dsDomain.name());
-                resp.put("elapsedMs", elapsed);
-                resp.put("columns", columns);
-                resp.put("rows", rows);
-                resp.put("rowCount", rows.size());
-                return resp;
-            } catch (Exception e) {
-                logger.warn("SQL execution failed for domain: {}, attempt: {}, error: {}", 
-                           domain, attempt, e.getMessage());
-                
-                // 如果是最后一次尝试，抛出异常
-                if (attempt == maxRetries) {
-                    logger.error("All SQL execution attempts failed for domain: {}, final SQL: {}", 
+                    // MongoDB 分支：必须在 namedJdbc 之前 return 掉
+                    if ("mongodb".equalsIgnoreCase(dbms) || "mongo".equalsIgnoreCase(dbms)) {
+                        Map<String, Object> resp = executeOnMongo(dsDomain, sqlWithLimit, maxRows, t0);
+                        logger.info("Mongo query executed successfully for domain: {}, rows returned: {}, time: {}ms",
+                                domain,
+                                ((List<?>) resp.getOrDefault("rows", List.of())).size(),
+                                resp.get("elapsedMs"));
+                        return resp;
+                    }
+
+                    // 尝试执行SQL
+                    List<Map<String, Object>> rows =
+                            namedJdbc.query(sqlWithLimit, params, new ColumnMapRowMapper());
+
+                    List<String> columns = rows.isEmpty()
+                            ? List.of()
+                            : new ArrayList<>(rows.get(0).keySet());
+
+                    long elapsed = System.currentTimeMillis() - t0;
+                    logger.info("SQL executed successfully for domain: {}, rows returned: {}, time: {}ms",
+                            domain, rows.size(), elapsed);
+
+                    Map<String, Object> resp = new LinkedHashMap<>();
+                    resp.put("dataSource", dsDomain.name());
+                    resp.put("elapsedMs", elapsed);
+                    resp.put("columns", columns);
+                    resp.put("rows", rows);
+                    resp.put("rowCount", rows.size());
+                    return resp;
+                } catch (Exception e) {
+                    logger.warn("SQL execution failed for domain: {}, attempt: {}, error: {}",
+                            domain, attempt, e.getMessage());
+
+                    // 如果是最后一次尝试，抛出异常
+                    if (attempt == maxRetries) {
+                        logger.error("All SQL execution attempts failed for domain: {}, final SQL: {}",
                                 domain, sql);
-                    throw e;
-                }
-                
-                // 尝试修复SQL
-                String oldSql = sql;
-                sql = repairSqlForExecution(sql, e.getMessage());
-                logger.debug("SQL repair attempt - from: {}, to: {}", oldSql, sql);
-                
-                // 如果修复后的SQL与原始SQL相同，不再重试
-                if (sql.equals(oldSql)) {
-                    logger.warn("SQL repair did not change the statement, stopping retry for domain: {}", domain);
-                    throw e;
+                        throw e;
+                    }
+
+                    // 尝试修复SQL
+                    String oldSql = sql;
+                    sql = repairSqlForExecution(sql, e.getMessage());
+                    logger.debug("SQL repair attempt - from: {}, to: {}", oldSql, sql);
+
+                    // 如果修复后的SQL与原始SQL相同，不再重试
+                    if (sql.equals(oldSql)) {
+                        logger.warn("SQL repair did not change the statement, stopping retry for domain: {}", domain);
+                        throw e;
+                    }
                 }
             }
-        }
-            
+
             // 理论上不会到达这里
             throw new RuntimeException("SQL执行失败，重试次数已耗尽");
         } finally {
             DomainContext.clear();
         }
     }
-    
+
     /**
      * 根据执行错误修复SQL
      * @param sql 原始SQL
@@ -157,18 +178,18 @@ public class SqlExecuteService {
         if (sql == null || sql.trim().isEmpty()) {
             return sql;
         }
-        
+
         String repaired = sql;
-        
+
         // 根据错误信息进行针对性修复
         errorMessage = errorMessage.toLowerCase();
-        
+
         // 处理列名歧义错误
         if (errorMessage.contains("column") && errorMessage.contains("ambiguous")) {
             // 尝试添加表名前缀到SELECT列中
             repaired = addTablePrefixToAmbiguousColumns(repaired);
         }
-        
+
         // 处理表名不存在的错误
         if (errorMessage.contains("table") && errorMessage.contains("doesn't exist")) {
             // 尝试移除可能的schema前缀
@@ -176,13 +197,13 @@ public class SqlExecuteService {
             // 尝试修复常见的表名错误
             repaired = fixCommonTableNameErrors(repaired);
         }
-        
+
         // 处理列名不存在的错误
 //        if (errorMessage.contains("column") && errorMessage.contains("doesn't exist")) {
 //            // 尝试修复可能的列名拼写错误（简单处理：保留列名结构）
 //            repaired = repaired.replaceAll("(?i)SELECT\\s+.*\\s+FROM", "SELECT * FROM");
 //        }
-        
+
         // 处理语法错误
         if (errorMessage.contains("you have an error in your sql syntax")) {
             // 尝试修复常见的语法错误
@@ -190,7 +211,7 @@ public class SqlExecuteService {
             repaired = repaired.replaceAll("'\\b(\\d+(\\.\\d+)?)\\b'", "$1");
             repaired = repaired.replaceAll("=\\s*=", "=");
         }
-        
+
         // 处理未闭合的引号
         if (errorMessage.contains("unclosed quotation mark")) {
             int quoteCount = repaired.replaceAll("[^']", "").length();
@@ -198,20 +219,20 @@ public class SqlExecuteService {
                 repaired = repaired + "'";
             }
         }
-        
+
         return repaired;
     }
-    
+
     /**
      * 为模糊列添加表名前缀
      */
     private String addTablePrefixToAmbiguousColumns(String sql) {
         // 简单实现：查找FROM子句中的表名，然后为SELECT中的列添加前缀
         String lowerSql = sql.toLowerCase();
-        
+
         // 提取表名
         String mainTableName = null;
-        
+
         // 处理FROM子句
         int fromIndex = lowerSql.indexOf(" from ");
         if (fromIndex != -1) {
@@ -220,18 +241,18 @@ public class SqlExecuteService {
             int joinIndex = fromPart.toLowerCase().indexOf(" join ");
             int orderByIndex = fromPart.toLowerCase().indexOf(" order by ");
             int groupByIndex = fromPart.toLowerCase().indexOf(" group by ");
-            
+
             // 找到FROM子句的结束位置
             int endIndex = fromPart.length();
             if (whereIndex != -1) endIndex = Math.min(endIndex, whereIndex);
             if (joinIndex != -1) endIndex = Math.min(endIndex, joinIndex);
             if (orderByIndex != -1) endIndex = Math.min(endIndex, orderByIndex);
             if (groupByIndex != -1) endIndex = Math.min(endIndex, groupByIndex);
-            
+
             String mainTable = fromPart.substring(0, endIndex).trim();
             mainTableName = mainTable.replaceAll("\\s+.*", ""); // 移除别名
         }
-        
+
         // 如果找到表名，为SELECT列添加表名前缀
         if (mainTableName != null) {
             // 简单处理：只处理没有别名和复杂表达式的情况
@@ -240,7 +261,7 @@ public class SqlExecuteService {
             int fromIndex2 = lowerSql.indexOf(" from ");
             if (selectIndex != -1 && fromIndex2 != -1) {
                 String selectPart = sql.substring(selectIndex + 6, fromIndex2).trim();
-                
+
                 // 检查SELECT部分是否包含函数或复杂表达式
                 if (!selectPart.contains("(") && !selectPart.contains(")")) {
                     // 简单情况：只包含列名
@@ -259,11 +280,11 @@ public class SqlExecuteService {
                 }
             }
         }
-        
+
         // 如果无法处理，返回原始SQL
         return sql;
     }
-    
+
     /**
      * 修复常见的表名错误
      */
@@ -274,7 +295,7 @@ public class SqlExecuteService {
         tableNameMapping.put("portfolios", "portfolio");
         tableNameMapping.put("risk_metrics", "risk_metric");
         tableNameMapping.put("departments", "department");
-        
+
         String result = sql;
         // 替换表名
         for (Map.Entry<String, String> entry : tableNameMapping.entrySet()) {
@@ -283,7 +304,7 @@ public class SqlExecuteService {
             // 确保只替换表名，不替换列名
             result = result.replaceAll("(?i)(from|join|on)\\s+" + wrong + "\\s*", "$1 " + correct + " ");
         }
-        
+
         return result;
     }
 
@@ -305,6 +326,12 @@ public class SqlExecuteService {
         if (m.equals("POSTGRES") || m.equals("POSTGRESQL") || m.equals("PG")) {
             m = "PGSQL";
         }
+
+        // 常见写法：mongo / mongodb 都归一到 MONGODB
+        if (m.equals("MONGO") || m.equals("MONGODB")) {
+            m = "MONGODB";
+        }
+
 
         // 1) 先尝试直接当 enum
         try {
@@ -348,52 +375,176 @@ public class SqlExecuteService {
         throw new BusinessException("params 必须是 JSON object / Map");
     }
 
-    public QueryResult execute(String domain, String sql, Map<String, ?> params, int limit) {
-        QueryResult qr = new QueryResult();
-        long t0 = System.currentTimeMillis();
+    private Map<String, Object> executeOnMongo(
+            DataSourceDomain dsDomain,
+            String sqlWithLimit,   // 你外面传进来的 sql（可能已经加过 limit，无所谓）
+            int maxRows,
+            long t0
+    ) {
+        // 1) 选 MongoTemplate（按域）
+        MongoTemplate mt = pickMongoTemplate(dsDomain);
 
-        // 读库路由（你现有的 query 用的是 DataSourceDomain.valueOf(domain)，这里保持一致）
-        DomainContext.set(DataSourceDomain.valueOf(domain));
-        try {
-            if (sql == null || sql.isBlank()) {
-                throw new BusinessException("sql 为空");
+        // 2) 解析 SQL（极简：只识别 FROM + WHERE 里 col='value' 这种等值 AND）
+        ParsedSql ps = parseMinimalSelect(sqlWithLimit);
+
+        // 3) 构造 Mongo Query
+        Query q = new Query();
+        if (!ps.equalsConditions.isEmpty()) {
+            List<Criteria> cs = new ArrayList<>();
+            for (Map.Entry<String, Object> kv : ps.equalsConditions.entrySet()) {
+                cs.add(Criteria.where(kv.getKey()).is(kv.getValue()));
             }
-            SqlGuard.validateReadOnlySingleStatement(sql);
-
-            String safeSql = SqlGuard.ensureLimit(sql, limit);
-
-            ResultSetExtractor<QueryResult> extractor = rs -> {
-                ResultSetMetaData md = rs.getMetaData();
-                int cc = md.getColumnCount();
-
-                for (int i = 1; i <= cc; i++) {
-                    qr.getColumns().add(md.getColumnLabel(i));
-                }
-                while (rs.next()) {
-                    List<Object> row = new ArrayList<>(cc);
-                    for (int i = 1; i <= cc; i++) {
-                        row.add(rs.getObject(i));
-                    }
-                    qr.getRows().add(row);
-                }
-                return qr;
-            };
-
-            namedJdbc.query(safeSql, (params == null ? Map.of() : params), extractor);
-
-            qr.setSuccess(true);
-            qr.setStatus("success");
-            return qr;
-
-        } catch (Exception e) {
-            qr.setSuccess(false);
-            qr.setStatus("fail");
-            qr.setErrorMsg(e.getMessage());
-            return qr;
-        } finally {
-            qr.setElapsedMs(System.currentTimeMillis() - t0);
-            DomainContext.clear();
+            q.addCriteria(new Criteria().andOperator(cs.toArray(new Criteria[0])));
         }
+
+        // 只做行数限制（先不管 SQL 里写没写 LIMIT）
+        q.limit(Math.max(1, maxRows));
+
+        // 4) 执行
+        @SuppressWarnings("rawtypes")
+        List<Map> docs = mt.find(q, Map.class, ps.collection);
+
+        // 5) 清理 _id 并组装响应（对齐你 JDBC 返回格式）
+        for (Map<?, ?> d : docs) d.remove("_id");
+
+        List<String> columns;
+        if (docs.isEmpty()) columns = List.of();
+        else {
+            columns = new ArrayList<>();
+            for (Object k : docs.get(0).keySet()) columns.add(String.valueOf(k));
+        }
+
+        long elapsed = System.currentTimeMillis() - t0;
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("dataSource", dsDomain.name());
+        resp.put("elapsedMs", elapsed);
+        resp.put("columns", columns);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List) docs;
+        resp.put("rows", rows);
+        resp.put("rowCount", rows.size());
+        return resp;
+    }
+
+    /** 按 dsDomain 选择 finance/healthcare MongoTemplate。 */
+    private MongoTemplate pickMongoTemplate(DataSourceDomain dsDomain) {
+        String n = dsDomain.name().toUpperCase(Locale.ROOT);
+        if (n.contains("FINANCE")) return financeMongoTemplate;
+        if (n.contains("HEALTHCARE")) return healthcareMongoTemplate;
+        throw new BusinessException("未知 domain: " + dsDomain.name());
+    }
+
+    private static class ParsedSql {
+        String collection;
+        // 只支持等值 AND 条件：col = value
+        Map<String, Object> equalsConditions = new LinkedHashMap<>();
+    }
+
+    /**
+     * 最小 SQL 解析器：
+     * 支持：
+     *   SELECT ... FROM <table> [WHERE col='x' AND col2=123]
+     * 不支持：
+     *   JOIN / OR / IN / LIKE / BETWEEN / ORDER BY / GROUP BY / 子查询
+     */
+    private ParsedSql parseMinimalSelect(String sql) {
+        if (sql == null || sql.isBlank()) throw new BusinessException("sql 为空");
+
+        String s = sql.trim().replaceAll("\\s+", " ");
+        String upper = s.toUpperCase(Locale.ROOT);
+
+        int fromIdx = upper.indexOf(" FROM ");
+        if (fromIdx < 0) throw new BusinessException("Mongo 最小执行器仅支持 SELECT ... FROM ...");
+
+        // 表名
+        String tail = s.substring(fromIdx + 6).trim();
+
+        // 截断到 WHERE（如果有）
+        String tablePart;
+        int whereIdx = tail.toUpperCase(Locale.ROOT).indexOf(" WHERE ");
+        if (whereIdx >= 0) tablePart = tail.substring(0, whereIdx).trim();
+        else tablePart = tail.trim();
+
+        // tablePart 可能带别名，这里只取第一个 token
+        String[] tokens = tablePart.split(" ");
+        String table = tokens[0].trim();
+        if (table.isEmpty()) throw new BusinessException("无法解析 FROM 表名");
+
+        ParsedSql ps = new ParsedSql();
+        ps.collection = table;
+
+        // WHERE 等值 AND
+        if (whereIdx >= 0) {
+            String wherePart = tail.substring(whereIdx + 7).trim();
+
+            // 去掉后面可能的 LIMIT / ORDER BY（先简单截断）
+            wherePart = cutOff(wherePart, " ORDER BY ");
+            wherePart = cutOff(wherePart, " LIMIT ");
+            wherePart = cutOff(wherePart, " GROUP BY ");
+            wherePart = cutOff(wherePart, " HAVING ");
+
+            // 只支持 AND
+            String[] conds = wherePart.split("(?i)\\s+AND\\s+");
+
+            for (String cond : conds) {
+                cond = cond.trim();
+                if (cond.isEmpty()) continue;
+
+                // 支持 col = 'xxx' 或 col='xxx' 或 col = 123
+                Matcher m = Pattern.compile("^([a-zA-Z0-9_\\.]+)\\s*=\\s*(.+)$").matcher(cond);
+                if (!m.find()) {
+                    throw new BusinessException("Mongo 最小执行器 WHERE 仅支持等值条件: " + cond);
+                }
+
+                String col = m.group(1).trim();
+                String rawVal = m.group(2).trim();
+
+                // 去掉可能的尾部分号
+                if (rawVal.endsWith(";")) rawVal = rawVal.substring(0, rawVal.length() - 1).trim();
+
+                Object val = parseLiteral(rawVal);
+                // 如果是 t.col 形式，先用 col（不带表别名）
+                if (col.contains(".")) col = col.substring(col.lastIndexOf('.') + 1);
+
+                ps.equalsConditions.put(col, val);
+            }
+        }
+
+        return ps;
+    }
+
+    private String cutOff(String s, String keywordUpperWithSpaces) {
+        String upper = s.toUpperCase(Locale.ROOT);
+        int idx = upper.indexOf(keywordUpperWithSpaces);
+        if (idx >= 0) return s.substring(0, idx).trim();
+        return s;
+    }
+
+    private Object parseLiteral(String raw) {
+        raw = raw.trim();
+
+        // 字符串：'xxx' 或 "xxx"
+        if ((raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith("\"") && raw.endsWith("\""))) {
+            return raw.substring(1, raw.length() - 1);
+        }
+
+        // NULL
+        if ("NULL".equalsIgnoreCase(raw)) return null;
+
+        // 整数
+        if (raw.matches("[-+]?\\d+")) {
+            try { return Long.parseLong(raw); } catch (Exception ignore) {}
+        }
+
+        // 小数
+        if (raw.matches("[-+]?\\d+\\.\\d+")) {
+            try { return Double.parseDouble(raw); } catch (Exception ignore) {}
+        }
+
+        // 兜底：按字符串处理
+        return raw;
     }
 
 }

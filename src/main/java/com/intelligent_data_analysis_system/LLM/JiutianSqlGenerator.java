@@ -17,7 +17,7 @@ import java.util.stream.Collectors;
 
 @RequiredArgsConstructor
 @Service
-@ConditionalOnProperty(name = "app.ai.mode", havingValue = "jiutian")
+@ConditionalOnProperty(name = "app.ai.mode")
 public class JiutianSqlGenerator implements SqlGenerator {
 
     private static final Logger logger = LoggerFactory.getLogger(JiutianSqlGenerator.class);

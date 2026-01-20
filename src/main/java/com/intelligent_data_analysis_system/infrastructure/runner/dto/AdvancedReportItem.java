@@ -8,21 +8,19 @@ import java.util.List;
 
 @Data
 public class AdvancedReportItem {
-    public String id;
-    public String query;          // 题目文本
-    public String chartType;      // "kpi" | "bar" | "pie" | "line" | "table"
-    public List<String> labels;   // 类别/时间轴
-    public List<Double> values;   // 单序列数值
-    public String kpiText;        // chartType=kpi 时展示（可选）
-    public String summaryHtml;    // 结论性文字（可选，非必需）
+    private String id;
+    private String query;
 
-    public AdvancedReportItem(String id, String query) {
-        this.id = id;
-        this.query = query;
-        this.labels = new ArrayList<>();
-        this.values = new ArrayList<>();
-        this.kpiText = "";
-        this.summaryHtml = "";
-        this.chartType = "table";
-    }
+    // 文字分析（不含错误/耗时/对比）
+    private String narrative;
+
+    // 原始数据表（一定给，哪怕没有图）
+    private String tableHtml;
+
+    // 0~2 张图（内联 SVG，避免 base64 拥塞）
+    private List<String> chartSvgs = new ArrayList<>();
+
+    // 小结要点
+    private List<String> bullets = new ArrayList<>();
+
 }

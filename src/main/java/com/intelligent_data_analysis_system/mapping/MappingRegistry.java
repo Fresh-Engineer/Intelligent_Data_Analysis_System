@@ -102,4 +102,46 @@ public class MappingRegistry {
         ((Map<String, Object>) ta).forEach((k, v) -> res.put(k, String.valueOf(v)));
         return res;
     }
+
+    @SuppressWarnings("unchecked")
+    public String buildEnumConstraintPrompt(String domain) {
+        Map<String, Object> dm = domain(domain);
+        Object vm = dm.get("value_mapping");
+        if (!(vm instanceof Map)) return "";
+
+        Map<String, Object> valueMap = (Map<String, Object>) vm;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("【枚举值强约束（必须严格遵守）】\n");
+
+        valueMap.forEach((col, mappingObj) -> {
+            if (!(mappingObj instanceof Map)) return;
+
+            Map<?, ?> m = (Map<?, ?>) mappingObj;
+
+            // 允许值集合（把各种类型都转成字符串）
+            Set<String> uniq = new LinkedHashSet<>();
+            for (Object v : m.values()) {
+                if (v == null) continue;
+                uniq.add(String.valueOf(v));
+            }
+
+            sb.append("- ").append(String.valueOf(col))
+                    .append(" 只允许使用以下编码值：")
+                    .append(String.join(", ", uniq))
+                    .append("\n");
+
+            sb.append("  语义映射规则：\n");
+            m.forEach((k, v) -> {
+                sb.append("  - ").append(String.valueOf(k))
+                        .append(" → '").append(String.valueOf(v)).append("'\n");
+            });
+        });
+
+        sb.append("- 禁止在 SQL 中直接使用自然语言值（如 Female / Male / 女 / 男）\n");
+        sb.append("- 禁止在 SQL 中直接使用英汉翻译值（如 Cancelled）\n");
+        return sb.toString();
+    }
+
+
 }

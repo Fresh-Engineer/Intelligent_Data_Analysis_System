@@ -10,6 +10,7 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
         "com.intelligent_data_analysis_system.domain.finance.mapper",
         "com.intelligent_data_analysis_system.domain.healthcare.mapper"
 })
+@ConfigurationPropertiesScan("com.intelligent_data_analysis_system.infrastructure.config.properties")
 public class IntelligentDataAnalysisSystemApplication {
 
     public static void main(String[] args) {

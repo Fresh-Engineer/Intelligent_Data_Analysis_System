@@ -1,14 +1,13 @@
 package com.intelligent_data_analysis_system.infrastructure.config.properties;
 
 import lombok.Data;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @Data
-@ConfigurationProperties(prefix = "app.routing")
-public class RoutingProperties {
+@ConfigurationProperties(prefix = "app.query")
+public class QueryProperties {
     /**
-     * mysql / pg / mongodb
+     * Maximum number of rows to return in query results
      */
-    private String dbms;
+    private int maxRows = 200;
 }

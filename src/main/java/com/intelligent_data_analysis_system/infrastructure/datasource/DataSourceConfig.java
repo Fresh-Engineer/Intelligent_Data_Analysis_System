@@ -9,6 +9,7 @@ import lombok.RequiredArgsConstructor;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.mybatis.spring.SqlSessionTemplate;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -19,6 +20,7 @@ import java.util.Map;
 @Configuration
 @RequiredArgsConstructor
 @EnableConfigurationProperties({RoutingProperties.class, MultiDataSourceProperties.class, QueryProperties.class})
+@ConditionalOnExpression("!'${app.routing.dbms:mysql}'.equalsIgnoreCase('mongodb')") // ✅ mongodb 时整个类不加载
 public class DataSourceConfig {
 
     private final RoutingProperties routingProperties;
@@ -53,7 +55,6 @@ public class DataSourceConfig {
         ds.setMaximumPoolSize(5);
         ds.setMinimumIdle(1);
         ds.setPoolName("Hikari-" + p.getUrl());
-
         return ds;
     }
 
@@ -62,19 +63,15 @@ public class DataSourceConfig {
         MybatisSqlSessionFactoryBean factory = new MybatisSqlSessionFactoryBean();
         factory.setDataSource(routingDataSource);
 
-        // 手动创建 MybatisConfiguration（类型正确）
         com.baomidou.mybatisplus.core.MybatisConfiguration configuration =
                 new com.baomidou.mybatisplus.core.MybatisConfiguration();
         configuration.setMapUnderscoreToCamelCase(true);
-        configuration.setLogImpl(org.apache.ibatis.logging.stdout.StdOutImpl.class); // 可选
+        configuration.setLogImpl(org.apache.ibatis.logging.stdout.StdOutImpl.class);
         factory.setConfiguration(configuration);
 
-        // 关键：让 MP 还能识别 @TableName/@TableField 等
         factory.setGlobalConfig(new com.baomidou.mybatisplus.core.config.GlobalConfig());
-
         return factory.getObject();
     }
-
 
     @Bean
     public SqlSessionTemplate sqlSessionTemplate(SqlSessionFactory sqlSessionFactory) {

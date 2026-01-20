@@ -1,8 +1,10 @@
 package com.intelligent_data_analysis_system.LLM;
 
 import com.intelligent_data_analysis_system.infrastructure.config.properties.RoutingProperties;
+import com.intelligent_data_analysis_system.mapping.MappingRegistry;
 import com.intelligent_data_analysis_system.service.SchemaTextProvider;
 import com.intelligent_data_analysis_system.service.SqlExecuteService;
+import com.intelligent_data_analysis_system.utils.EnumSqlRewriter;
 import com.intelligent_data_analysis_system.utils.Generator.SqlGenResult;
 import com.intelligent_data_analysis_system.utils.Generator.SqlGenerator;
 import lombok.RequiredArgsConstructor;
@@ -17,7 +19,7 @@ import java.util.stream.Collectors;
 
 @RequiredArgsConstructor
 @Service
-@ConditionalOnProperty(name = "app.ai.mode", havingValue = "qwen")
+@ConditionalOnProperty(name = "app.ai.mode")
 public class QWenSqlGenerator implements SqlGenerator {
     private static final Logger logger = LoggerFactory.getLogger(QWenSqlGenerator.class);
 
@@ -33,7 +35,136 @@ public class QWenSqlGenerator implements SqlGenerator {
     public SqlGenResult generate(String domain, String problem) {
         String dialect = toDialect(routingProperties.getDbms());
 
-        String system = """
+        // 1) 先在当前 domain 尝试
+        GenAttempt first = generateOnce(domain, problem, dialect);
+
+        if (first.valid && looksLikeSql(first.sql)) {
+            logger.info("Final SQL (no fallback) domain={}, problem={}, sql={}", domain, problem, first.sql);
+            return new SqlGenResult(domain, first.sql);
+        }
+
+        // 2) fallback 到另一个 domain
+        String fallbackDomain = otherDomain(domain);
+        GenAttempt second = generateOnce(fallbackDomain, problem, dialect);
+
+        // 3) fallback 成功：返回 fallbackDomain（非常重要：让后续执行路由走对库）
+        if (second.valid && looksLikeSql(second.sql)) {
+            logger.warn("Fallback succeeded: {} -> {}. problem={}, sql={}", domain, fallbackDomain, problem, second.sql);
+            return new SqlGenResult(fallbackDomain, second.sql);
+        }
+
+        // 4) 两边都不行：择优（优先 valid；否则优先更长、且像 SQL 的）
+        String bestSql = pickBestSql(first, second);
+        String bestDomain = pickBestDomain(domain, fallbackDomain, first, second);
+
+        logger.warn("Both domains failed. Pick best. bestDomain={}, problem={}, bestSql={}", bestDomain, problem, bestSql);
+        return new SqlGenResult(bestDomain, bestSql);
+    }
+
+    /** ========== 单域生成（把你原 generate 里的主体循环搬进来） ========== */
+    private GenAttempt generateOnce(String domain, String problem, String dialect) {
+        String system = buildSystemPrompt(dialect);
+
+        // 关键：每次按 domain 重新取 schemaText（不要复用别的 domain）
+        String schemaText = schemaTextProvider.getSchemaText(domain, 60, 40);
+
+        String enumConstraint = "";
+        try {
+            Object raw = MappingRegistry.get().buildEnumConstraintPrompt(domain);
+            enumConstraint = raw == null ? "" : String.valueOf(raw);
+            enumConstraint = enumConstraint.replace("%", "%%");
+        } catch (Exception e) {
+            logger.warn("mapping unavailable, skip enum constraint. domain={}", domain, e);
+            enumConstraint = "";
+        }
+
+        String prompt = """
+【任务】根据以下信息，将自然语言问题准确转换为可执行的SQL查询语句
+
+【Domain】%s
+
+【数据库Schema】
+%s
+
+%s
+
+【用户问题】
+%s
+
+【生成要求】
+1. **准确性**：严格基于提供的Schema生成SQL，确保表名、列名完全匹配
+2. **完整性**：覆盖问题中的所有查询条件和需求
+3. **语法正确性**：确保生成的SQL符合%s方言的语法规则
+4. **性能考虑**：避免不必要的全表扫描，合理使用索引
+5. **结果可读性**：返回有意义的列名，避免使用*
+6. 不是所有检索关键词都是包含关系，也有相同相等关系
+7. 在FINANCE中找不到就到HEALTHCARE中找，反之亦然
+
+【输出格式】
+仅输出SQL语句，使用```sql ... ```格式包裹，不包含任何其他解释或说明
+""".formatted(domain, schemaText, enumConstraint, problem, dialect);
+
+        int maxRetries = 3;
+        String sql = null;
+        String repairedSql = null;
+        boolean valid = false;
+
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            String raw = chatClient.chat(system, prompt);
+            sql = extractSql(raw);
+
+            logger.info("[NL2SQL][{}] attempt={}, raw={}", domain, attempt, raw);
+            logger.info("[NL2SQL][{}] attempt={}, extracted={}", domain, attempt, sql);
+
+            sql = EnumSqlRewriter.rewrite(sql, domain);
+
+            boolean syntaxValid = validateSql(sql);
+            boolean schemaValid = validateSqlTableAndColumns(sql, domain);
+            valid = syntaxValid && schemaValid;
+
+            logger.info("[NL2SQL][{}] validation - syntax={}, schema={}", domain, syntaxValid, schemaValid);
+
+            if (valid) {
+                logger.info("[NL2SQL][{}] passed on attempt {}", domain, attempt);
+                break;
+            }
+
+            logger.warn("[NL2SQL][{}] failed on attempt {}, attempting repair. syntaxValid={}, schemaValid={}",
+                    domain, attempt, syntaxValid, schemaValid);
+
+            repairedSql = repairSql(sql);
+            logger.debug("[NL2SQL][{}] repaired SQL={}", domain, repairedSql);
+
+            boolean repairedSyntaxValid = looksLikeSql(repairedSql) && validateSql(repairedSql);
+            boolean repairedSchemaValid = looksLikeSql(repairedSql) && validateSqlTableAndColumns(repairedSql, domain);
+            boolean repairedValid = repairedSyntaxValid && repairedSchemaValid;
+
+            logger.debug("[NL2SQL][{}] repaired validation - syntax={}, schema={}", domain, repairedSyntaxValid, repairedSchemaValid);
+
+            if (repairedValid) {
+                logger.info("[NL2SQL][{}] repaired passed on attempt {}", domain, attempt);
+                sql = repairedSql;
+                valid = true;
+                break;
+            }
+
+            // 最后一次：择优保留
+            if (attempt == maxRetries) {
+                if (repairedSql != null && !repairedSql.isEmpty()
+                        && (sql == null || sql.isEmpty() || repairedSql.length() > sql.length())) {
+                    sql = repairedSql;
+                    logger.debug("[NL2SQL][{}] using repaired SQL as it's more complete", domain);
+                }
+            }
+        }
+
+        logger.info("[NL2SQL][{}] final sql={}", domain, sql);
+        return new GenAttempt(domain, sql, valid);
+    }
+
+    /** ========== system prompt 抽出来，避免重复 ========== */
+    private String buildSystemPrompt(String dialect) {
+        return """
 你是一个专业的Text-to-SQL生成器，能够将自然语言问题准确转换为目标数据库的SQL查询语句。
 
 【核心要求】
@@ -50,120 +181,69 @@ public class QWenSqlGenerator implements SqlGenerator {
    - 日期时间类型（date, timestamp）：必须使用正确的格式和函数
 3. **空值处理**：对于可能为空的值，使用IS NULL/IS NOT NULL而不是= NULL或!= NULL
 4. **日期时间处理**：
-   - 日期比较：使用标准日期格式'YYYY-MM-DD'，如establish_date < '2010-01-01'
-   - 年份提取：使用EXTRACT(YEAR FROM column_name)函数，如EXTRACT(YEAR FROM inception_date) = 2010
-   - 月份提取：使用EXTRACT(MONTH FROM column_name)函数
-   - 日期函数必须作用于有效的日期/时间类型列
-5. **聚合函数**：在需要统计、求和、平均值等场景时，正确使用COUNT、SUM、AVG等聚合函数
-6. **分组和排序**：根据问题需求正确使用GROUP BY和ORDER BY子句
-7. **条件逻辑**：使用AND/OR正确组合条件，确保逻辑准确性
-8. **连接查询**：当需要查询多个表的数据时，正确使用JOIN语句并指定连接条件
-
-【SQL语法示例】
-- 正确：SELECT counterparty_name FROM counterparties WHERE establish_date < '2010-01-01' AND EXTRACT(YEAR FROM inception_date) = 2010
-- 正确：SELECT name FROM users WHERE join_date BETWEEN '2020-01-01' AND '2020-12-31'
-- 错误：SELECT * FROM table WHERE date = 2020-01-01  -- 缺少单引号
-- 错误：SELECT * FROM table WHERE YEAR(date) = 2020  -- 使用了错误的年份函数
+   - 日期比较：使用标准日期格式'YYYY-MM-DD'
+   - 年份提取：使用EXTRACT(YEAR FROM column_name)
+   - 月份提取：使用EXTRACT(MONTH FROM column_name)
+5. **聚合函数**：正确使用COUNT、SUM、AVG等
+6. **分组和排序**：正确使用GROUP BY和ORDER BY
+7. **条件逻辑**：使用AND/OR正确组合条件
+8. **连接查询**：需要多表时正确使用JOIN并指定连接条件
 
 【禁止事项】
 - 禁止生成INSERT、UPDATE、DELETE等修改数据的语句
-- 禁止生成包含数据库管理命令的语句
 - 禁止生成注释或解释性文本
 - 禁止生成与问题无关的SQL语句
-- 禁止在数值类型上使用单引号
-- 禁止在字符串和日期类型上省略单引号
 
 请确保生成的SQL语句能够直接在目标数据库中执行并返回正确结果。
 """.formatted(dialect);
-
-        // 关键：生成 schemaText（控制长度，避免太长）
-        String schemaText = schemaTextProvider.getSchemaText(domain, 60, 40);
-
-        String prompt = """
-【任务】根据以下信息，将自然语言问题准确转换为可执行的SQL查询语句
-
-【Domain】%s
-
-【数据库Schema】
-%s
-
-【用户问题】
-%s
-
-【生成要求】
-1. **准确性**：严格基于提供的Schema生成SQL，确保表名、列名完全匹配
-2. **完整性**：覆盖问题中的所有查询条件和需求
-3. **语法正确性**：确保生成的SQL符合%s方言的语法规则
-4. **性能考虑**：避免不必要的全表扫描，合理使用索引
-5. **结果可读性**：返回有意义的列名，避免使用*
-
-【输出格式】
-仅输出SQL语句，使用```sql ... ```格式包裹，不包含任何其他解释或说明
-""".formatted(domain, schemaText, problem, dialect);
-
-        int maxRetries = 3;
-        String sql = null;
-        String repairedSql = null;
-        boolean valid = false;
-
-        for (int attempt = 1; attempt <= maxRetries; attempt++) {
-            logger.info("Generating SQL for domain: {}, problem: {}, attempt: {}", domain, problem, attempt);
-
-            // 生成SQL
-            String raw = chatClient.chat(system, prompt);
-            sql = extractSql(raw);
-
-            logger.debug("Raw response: {}", raw);
-            logger.debug("Extracted SQL: {}", sql);
-
-            // 验证SQL语法和表名/列名
-            boolean syntaxValid = validateSql(sql);
-            boolean schemaValid = validateSqlTableAndColumns(sql, domain);
-            valid = syntaxValid && schemaValid;
-
-            logger.debug("SQL validation result - syntax: {}, schema: {}", syntaxValid, schemaValid);
-
-            if (valid) {
-                logger.info("SQL validation passed on attempt {}", attempt);
-                break;
-            }
-
-            // 验证失败，尝试修复
-            logger.warn("SQL validation failed on attempt {}, attempting repair. Syntax valid: {}, Schema valid: {}",
-                    attempt, syntaxValid, schemaValid);
-
-            repairedSql = repairSql(sql);
-            logger.debug("Repaired SQL: {}", repairedSql);
-
-            // 验证修复后的SQL
-            syntaxValid = validateSql(repairedSql);
-            schemaValid = validateSqlTableAndColumns(repairedSql, domain);
-            valid = syntaxValid && schemaValid;
-
-            logger.debug("Repaired SQL validation result - syntax: {}, schema: {}", syntaxValid, schemaValid);
-
-            if (valid) {
-                logger.info("Repaired SQL validation passed on attempt {}", attempt);
-                sql = repairedSql;
-                break;
-            }
-
-            // 如果是最后一次尝试，即使验证失败也返回
-            if (attempt == maxRetries) {
-                logger.warn("All {} attempts failed. Using the best available SQL.", maxRetries);
-                // 如果修复后的SQL比原始SQL更完整，使用修复后的
-                if (repairedSql != null && !repairedSql.isEmpty() && (sql == null || sql.isEmpty() || repairedSql.length() > sql.length())) {
-                    sql = repairedSql;
-                    logger.debug("Using repaired SQL as it's more complete");
-                }
-                break;
-            }
-        }
-
-        logger.info("Final SQL for domain: {}, problem: {} - {}", domain, problem, sql);
-
-        return new SqlGenResult(domain, sql);
     }
+
+    private String otherDomain(String domain) {
+        if (domain == null) return "HEALTHCARE";
+        String d = domain.trim().toUpperCase(Locale.ROOT);
+        return "FINANCE".equals(d) ? "HEALTHCARE" : "FINANCE";
+    }
+
+    /** 选一个“最像能用”的SQL */
+    private String pickBestSql(GenAttempt a, GenAttempt b) {
+        String sa = a == null ? "" : (a.sql == null ? "" : a.sql.trim());
+        String sb = b == null ? "" : (b.sql == null ? "" : b.sql.trim());
+
+        boolean va = a != null && a.valid && looksLikeSql(sa);
+        boolean vb = b != null && b.valid && looksLikeSql(sb);
+
+        if (va && !vb) return sa;
+        if (vb && !va) return sb;
+        if (va && vb) return sa.length() >= sb.length() ? sa : sb;
+
+        boolean la = looksLikeSql(sa);
+        boolean lb = looksLikeSql(sb);
+        if (la && !lb) return sa;
+        if (lb && !la) return sb;
+
+        return sa.length() >= sb.length() ? sa : sb;
+    }
+
+    private String pickBestDomain(String d1, String d2, GenAttempt a, GenAttempt b) {
+        String best = pickBestSql(a, b);
+        if (best == null || best.isBlank()) return d1;
+        if (a != null && a.sql != null && a.sql.trim().equals(best.trim())) return d1;
+        return d2;
+    }
+
+    /** 记录单次 domain 生成结果 */
+    private static class GenAttempt {
+        final String domain;
+        final String sql;
+        final boolean valid;
+
+        GenAttempt(String domain, String sql, boolean valid) {
+            this.domain = domain;
+            this.sql = sql;
+            this.valid = valid;
+        }
+    }
+
 
     private String toDialect(String dbms) {
         if (dbms == null) return "PostgreSQL";
@@ -187,6 +267,20 @@ public class QWenSqlGenerator implements SqlGenerator {
 - 只能使用【数据库 Schema】中出现的表名和列名，禁止编造列名
 - 输出必须使用 ```sql ... ``` 包裹
 - 禁止输出任何解释、注释、道歉、免责声明
+
+【枚举值强约束（必须遵守）】
+- patient_master_index.gender 是枚举字段，只允许取值：'M', 'F', 'U'
+- 当问题中出现以下含义时，必须使用对应编码：
+  - 女性 / 女 / female / Female / woman / girl → 'F'
+  - 男性 / 男 / male / Male / man / boy → 'M'
+  - 未知 / 不详 / unknown → 'U'
+- 禁止在 SQL 中使用 'Female'、'Male' 等自然语言值
+
+                【严格约束】
+                - 只能使用【数据库Schema】中明确列出的表名和列名
+                - 如果问题涉及的实体在Schema中不存在，必须返回空SQL（```sql\\n\\n```）
+                - 禁止猜测、杜撰表或字段名（如 inventory / stock / pharmacy 等）
+                
 
 【多表与列名规则（极其重要，违反即错误）】
 1) 只要 SQL 中出现两张及以上表（JOIN / 子查询 FROM 多表）：
@@ -240,11 +334,12 @@ public class QWenSqlGenerator implements SqlGenerator {
         String s = raw.trim();
         if (s.isEmpty()) return "";
 
+        String sql="";
         // 1️⃣ 优先处理：从```sql ...```格式中提取
         var fencePattern = java.util.regex.Pattern.compile("(?is)```\\s*sql\\s*([\\s\\S]*?)\\s*```");
         var fenceMatcher = fencePattern.matcher(s);
         if (fenceMatcher.find()) {
-            String sql = fenceMatcher.group(1).trim();
+            sql = fenceMatcher.group(1).trim();
             if (!sql.isEmpty()) {
                 return stripTrailingSemicolon(sql);
             }
@@ -255,7 +350,7 @@ public class QWenSqlGenerator implements SqlGenerator {
         var selectPattern = java.util.regex.Pattern.compile("(?is)(?:^|\\s)(with|select)\\b[\\s\\S]*");
         var selectMatcher = selectPattern.matcher(s);
         if (selectMatcher.find()) {
-            String sql = selectMatcher.group(0).trim();
+            sql = selectMatcher.group(0).trim();
             // 处理可能包含的其他内容，只保留到第一个有效结束符
             int semicolonIndex = sql.indexOf(';');
             if (semicolonIndex != -1) {
@@ -274,14 +369,25 @@ public class QWenSqlGenerator implements SqlGenerator {
         if (s.toLowerCase().contains("select")) {
             // 尝试提取SELECT及其后的内容
             int selectIndex = s.toLowerCase().indexOf("select");
-            String sql = s.substring(selectIndex).trim();
+            sql = s.substring(selectIndex).trim();
             // 基本清理
             sql = sql.replaceAll("(?is)[^\\w\\s.,()<>!=+*/-]+", " ").trim();
             return stripTrailingSemicolon(sql);
         }
 
-        // 4️⃣ 最后兜底：确实没有SQL
-        return "";
+        // ✅ 关键：只接受 select/with/explain 开头的
+        if (!looksLikeSql(sql)) return "";
+
+        // ✅ 可选：去掉末尾分号
+        if (sql.endsWith(";")) sql = sql.substring(0, sql.length() - 1).trim();
+
+        return sql;
+    }
+
+    private boolean looksLikeSql(String s) {
+        if (s == null) return false;
+        String t = s.trim().toLowerCase(Locale.ROOT);
+        return t.startsWith("select") || t.startsWith("with") || t.startsWith("explain");
     }
 
     private String stripTrailingSemicolon(String sql) {
@@ -298,19 +404,16 @@ public class QWenSqlGenerator implements SqlGenerator {
      * @return 是否验证通过
      */
     private boolean validateSql(String sql) {
-        if (sql == null || sql.trim().isEmpty()) {
-            return false;
-        }
-
+        if (sql == null || sql.trim().isEmpty()) return false;
         try {
-            // 使用JSqlParser解析SQL，检查语法错误
             net.sf.jsqlparser.parser.CCJSqlParserUtil.parse(sql);
             return true;
         } catch (Exception e) {
-            // 解析失败，SQL语法有错误
+            logger.warn("[validateSql] parse failed: sql=[{}], err={}", sql, e.toString());
             return false;
         }
     }
+
 
     /**
      * 验证SQL中的表名和列名是否存在于数据库schema中

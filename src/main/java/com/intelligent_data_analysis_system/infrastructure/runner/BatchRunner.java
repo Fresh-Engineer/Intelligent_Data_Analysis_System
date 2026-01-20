@@ -3,8 +3,10 @@ package com.intelligent_data_analysis_system.infrastructure.runner;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.intelligent_data_analysis_system.LLM.QWenSqlGenerator;
+import com.intelligent_data_analysis_system.infrastructure.runner.dto.AdvancedReportItem;
 import com.intelligent_data_analysis_system.infrastructure.runner.dto.ProblemItem;
 import com.intelligent_data_analysis_system.infrastructure.runner.dto.QueryResult;
+import com.intelligent_data_analysis_system.infrastructure.runner.dto.SubmitItem;
 import com.intelligent_data_analysis_system.service.AiText2SqlService;
 import com.intelligent_data_analysis_system.service.SqlExecuteService;
 import com.intelligent_data_analysis_system.service.SqlSelfCheckService;
@@ -16,8 +18,7 @@ import com.intelligent_data_analysis_system.utils.Pruner.QueryResultPruner;
 import com.intelligent_data_analysis_system.utils.RuleFallback;
 import com.intelligent_data_analysis_system.utils.SqlExceptionRepair;
 import com.intelligent_data_analysis_system.utils.SqlPatchPipeline;
-import lombok.AllArgsConstructor;
-import lombok.Data;
+
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -204,39 +205,6 @@ public class BatchRunner implements CommandLineRunner {
         System.out.println("输出完成：answer_finance.json / answer_healthcare.json / finance_report.html / healthcare_report.html");
         System.out.println("FINANCE 初中级条目数=" + financeSubmit.size() + "，FINANCE 高级条目数=" + financeAdvancedItems.size());
         System.out.println("HEALTHCARE 初中级条目数=" + healthcareSubmit.size() + "，HEALTHCARE 高级条目数=" + healthcareAdvancedItems.size());
-    }
-
-    // =========================
-    // 初中级提交结构：严格 4 字段
-    // =========================
-    @Data
-    @AllArgsConstructor
-    public static class SubmitItem {
-        private String id;
-        private String query;
-        private String sql;
-        private String answer;
-    }
-
-    // =========================
-    // 高级报告结构：按题分节
-    // =========================
-    @Data
-    public static class AdvancedReportItem {
-        private String id;
-        private String query;
-
-        // 文字分析（不含错误/耗时/对比）
-        private String narrative;
-
-        // 原始数据表（一定给，哪怕没有图）
-        private String tableHtml;
-
-        // 0~2 张图（内联 SVG，避免 base64 拥塞）
-        private List<String> chartSvgs = new ArrayList<>();
-
-        // 小结要点
-        private List<String> bullets = new ArrayList<>();
     }
 
     private AdvancedReportItem buildEmptyAdvancedItem(String id, String query, String note) {
